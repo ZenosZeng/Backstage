@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/readme-cover.png" alt="Backstage：共享记忆、任务监控、飞书遥控" width="100%">
+</p>
+
 # Backstage
 
 **为多 Agent、多机器、多仓库开发提供共享记忆、任务监控与飞书遥控。**
