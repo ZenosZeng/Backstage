@@ -38,7 +38,7 @@ PID 身份通过启动时间、命令、工作目录核验；不会用宽泛 `pk
 | 服务 | 可选字段 |
 |---|---|
 | watchdog-b1k | `repo_root`、`log`、`eval_config` |
-| watchdog-train | `repo_root`、`log_root`、`kubectl_args`、`experiments` |
+| watchdog-train | `repo_root`、`log_root`、`kubectl_args`、`experiments`、`native_runs` |
 | claude-feishu | `credentials_file`、`workdir`、`claude_cli`、`dsh_cli`、`claude_model_name`、`dsh_model_name`、`timeout_seconds`、`dsh_timeout_seconds`、`permission_profile` |
 
 B1K 默认查找 `scripts/eval/{fleet,0srv16sim,2srv14sim,8srv8sim}/eval.log` 中最新日志。
@@ -50,6 +50,33 @@ Pi 默认查找 workspace 的 `Pi_b1k`（存在时）或 `Pi`，读取其 `kjob_
 实验优先通过 Kubernetes job 的提交脚本注解识别；历史串行启动器可在本机
 `experiments` 填 `["显示名", "*日志匹配字段*"]`，不把实验清单写入通用代码。
 保留训练 step/loss/ETA、离线评测状态与子日志活跃度、失败日志、停滞检测。
+
+susser-tod 原生 Pi05 训练通过本机配置 `native_runs` 接入，和旧 Pi 日志格式可以并存：
+
+```json
+{
+  "repo_root": "~/code/susser-tod",
+  "kubectl_args": ["-n", "training"],
+  "native_runs": [
+    {"artifact_dir": "~/code/artifacts/my-training-run", "producers_per_node": 4}
+  ]
+}
+```
+
+`artifact_dir` 采用已有发射产物：`consumer/producer-job-name.txt`、
+`consumer/producer-launch-id.txt` 和 `logs/<launch-id>/<role>-node_<index>.log`。
+每轮按文件中的确切 Job/launch 识别；续训后更新这些发射产物即可，无需把实验名写进通用代码。
+consumer 节点数/每节点 GPU 数来自 Kubernetes；producer 每节点进程数来自本机配置，
+节点 Ready 不等于每个 Python 进程存活，是否持续训练以 rank 0 的 step 为依据。
+总步数与 epoch 从发射预检日志读取，步速用最近 50 个 rank 0 日志窗口的均值。
+只追加读取原生日志，游标保存在已有 `cursors.json`，重载后保留预算及 checkpoint 保存记录。
+
+原生训练停滞按最后一次 step 的日志时间判断，其他日志持续刷屏不能掩盖停滞。
+producer 重试增加发橙色提醒，Job 的 `Failed/FailureTarget` 才判终止；
+部分节点完成不等于整个 Job 完成。供数的坏图像重采样与弃用警告不报训练失败。
+卡片中的 full/raw/EMA checkpoint 只表示保存日志完成，不替代 S3 payload/metadata 验收。
+原生训练的提醒阈值建议短于该 run 的供数等待超时，同时为正常 checkpoint 保存留出时间。
+配置/代码更新可用 `pixi run watchdog-train --restart` 热重载；不会重启训练或 producer。
 
 共用监控设置：`poll_seconds=60`；整点发送例行状态；默认 0-7 点和 13 点静默，告警不静默。
 B1K 停滞提醒/严重阈值为 7200/10800 秒；Pi 为 900/3600 秒，可通过

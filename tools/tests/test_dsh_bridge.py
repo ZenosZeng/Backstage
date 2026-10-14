@@ -12,7 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from tools.claude_feishu import harness
+from tools.claude_feishu import harness, sessions as session_state
 
 
 @pytest.fixture
@@ -58,8 +58,8 @@ def test_native_restart_is_managed_and_preserves_sessions(bridge, monkeypatch, t
     data = SimpleNamespace(event=SimpleNamespace(message=SimpleNamespace(message_id="restart-message")))
     bridge._service_ready = lambda: None
     bridge._service_config_path = str(tmp_path / "custom.json")
-    bridge._get_or_create_session("chat", "claude")
-    before = json.dumps(bridge._chat_sessions, sort_keys=True)
+    bridge.sessions.get_or_create("chat", "claude")
+    before = json.dumps(bridge.sessions.chats, sort_keys=True)
     process = mock.Mock()
     process.wait.return_value = 2
     popen = mock.Mock(return_value=process)
@@ -74,7 +74,7 @@ def test_native_restart_is_managed_and_preserves_sessions(bridge, monkeypatch, t
                     bridge._service_config_path, "--reply-message", "restart-message"]
     assert popen.call_args.kwargs["start_new_session"] is True
     assert bridge._restart_pending.is_set()
-    assert json.dumps(bridge._chat_sessions, sort_keys=True) == before
+    assert json.dumps(bridge.sessions.chats, sort_keys=True) == before
     run.assert_not_called()
     # A rejected validation replies from the still-running old bridge.
     worker.call_args.kwargs["target"]()
@@ -251,64 +251,64 @@ def test_migration_and_backup(bridge):
     path = Path(bridge.SESSION_FILE)
     raw = json.dumps({"version": 1, "chats": {"chat": old}})
     path.write_text(raw)
-    bridge._chat_sessions = bridge._load_sessions()
-    entry = bridge._chat_entry("chat")
+    bridge.sessions.chats = session_state.load_sessions(bridge.sessions.path)
+    entry = bridge.sessions.entry("chat")
     assert entry["sessions"]["claude"]["session_id"] == "important"
     assert entry["workdir"] == "/tmp" and entry["future"] == "keep"
     assert "session_id" not in entry
     normalized = json.dumps(entry)
-    assert json.dumps(bridge._normalize_chat(entry)) == normalized
+    assert json.dumps(session_state.normalize_chat(entry)) == normalized
     backup = path.with_name("sessions.json.v1.bak")
     assert backup.read_text() == raw and backup.stat().st_mode & 0o777 == 0o600
-    bridge._persist_sessions()
+    bridge.sessions.persist()
     assert json.loads(path.read_text())["version"] == 2
-    bridge._load_sessions()
+    session_state.load_sessions(bridge.sessions.path)
     assert backup.read_text() == raw
 
 
 def test_switch_persist_and_new_scopes(bridge):
-    bridge._chat_sessions["chat"] = {"session_id": "claude-id", "workdir": "/tmp"}
-    bridge._capture_session("chat", "dsh", "dsh-id", "/tmp")
+    bridge.sessions.chats["chat"] = {"session_id": "claude-id", "workdir": "/tmp"}
+    bridge.sessions.capture("chat", "dsh", "dsh-id", "/tmp")
     bridge._handle_command(None, "/dsh", "chat")
-    assert bridge._chat_harness("chat") == "dsh"
-    assert bridge._load_sessions()["chat"]["harness"] == "dsh"
+    assert bridge.sessions.harness_name("chat") == "dsh"
+    assert session_state.load_sessions(bridge.sessions.path)["chat"]["harness"] == "dsh"
     bridge._handle_command(None, "/new", "chat")
-    assert not bridge._session_entry("chat", "dsh").get("session_id")
-    assert bridge._session_entry("chat", "claude")["session_id"] == "claude-id"
+    assert not bridge.sessions.bucket("chat", "dsh").get("session_id")
+    assert bridge.sessions.bucket("chat", "claude")["session_id"] == "claude-id"
     bridge._handle_command(None, "/new all", "chat")
-    assert not bridge._session_entry("chat", "claude").get("session_id")
+    assert not bridge.sessions.bucket("chat", "claude").get("session_id")
     assert bridge._chat_workdir("chat") == "/tmp"
 
 
 def test_unavailable_dsh_and_usage(bridge, monkeypatch):
     monkeypatch.setitem(harness.REGISTRY, "dsh", harness.Harness("dsh", "", "capture"))
     bridge._handle_command(None, "/dsh", "chat")
-    assert bridge._chat_harness("chat") == "claude"
+    assert bridge.sessions.harness_name("chat") == "claude"
     assert "没有找到 dsh" in bridge._send_reply.call_args.args[1]
     bridge._handle_command(None, "/dsh hi", "chat")
     assert "用法" in bridge._send_reply.call_args.args[1]
-    bridge._chat_entry("chat", create=True)["harness"] = "dsh"
+    bridge.sessions.entry("chat", create=True)["harness"] = "dsh"
     bridge._execute_and_reply(None, "hi", "chat")
     bridge._post_card_reply.assert_not_called()
 
 
 def test_cd_preserves_session_and_warns(bridge, tmp_path):
-    bridge._capture_session("chat", "dsh", "sid", "/tmp")
+    bridge.sessions.capture("chat", "dsh", "sid", "/tmp")
     bridge._cmd_cd(None, "chat", str(tmp_path))
-    assert bridge._session_entry("chat", "dsh")["session_id"] == "sid"
+    assert bridge.sessions.bucket("chat", "dsh")["session_id"] == "sid"
     bridge._cmd_status(None, "chat")
     assert "目录与当前目录不同" in bridge._send_reply.call_args.args[1]
 
 
 def test_epoch_prevents_rebind_but_keeps_stats(bridge):
     bridge._cmd_new(None, "chat", "dsh")
-    bridge._capture_session("chat", "dsh", "stale", "/tmp", epoch=0)
-    assert not bridge._session_entry("chat", "dsh").get("session_id")
+    bridge.sessions.capture("chat", "dsh", "stale", "/tmp", epoch=0)
+    assert not bridge.sessions.bucket("chat", "dsh").get("session_id")
     state = bridge.RunState("dsh")
     state.turns = 1
-    bridge._update_chat_stats("chat", state, 10)
-    assert bridge._session_entry("chat", "dsh")["turns_total"] == 1
-    assert not bridge._session_entry("chat", "dsh").get("last_used")
+    bridge.sessions.update_stats("chat", state, 10)
+    assert bridge.sessions.bucket("chat", "dsh")["turns_total"] == 1
+    assert not bridge.sessions.bucket("chat", "dsh").get("last_used")
 
 
 def test_run_stdin_capture_resume_and_env(bridge, monkeypatch):
@@ -331,7 +331,7 @@ def test_run_stdin_capture_resume_and_env(bridge, monkeypatch):
         "FEISHU_APP_SECRET" not in kwargs["env"]
         and "DEEPSEEK_API_KEY" not in kwargs["env"]
     )
-    assert bridge._session_entry("chat", "dsh")["session_id"] == "session-fixture"
+    assert bridge.sessions.bucket("chat", "dsh")["session_id"] == "session-fixture"
     with mock.patch.object(
         bridge.subprocess, "Popen", return_value=Proc(events())
     ) as popen:
@@ -348,7 +348,7 @@ def test_run_stdin_capture_resume_and_env(bridge, monkeypatch):
     ],
 )
 def test_safe_session_recovery_once(bridge, error):
-    bridge._capture_session("chat", "dsh", "sid", bridge.WORKDIR)
+    bridge.sessions.capture("chat", "dsh", "sid", bridge.WORKDIR)
     fail = Proc([{"type": "error", "message": error}], rc=1, err=error)
     with mock.patch.object(
         bridge.subprocess, "Popen", side_effect=[fail, Proc(events())]
@@ -360,7 +360,7 @@ def test_safe_session_recovery_once(bridge, error):
 
 
 def test_task_error_never_retries(bridge):
-    bridge._capture_session("chat", "dsh", "sid", bridge.WORKDIR)
+    bridge.sessions.capture("chat", "dsh", "sid", bridge.WORKDIR)
     proc = Proc([{"type": "error", "message": "file not found"}], rc=1)
     with mock.patch.object(bridge.subprocess, "Popen", return_value=proc) as popen:
         answer, state = bridge._run_dsh("hi", "chat")
@@ -372,8 +372,8 @@ def test_new_during_session_creation(bridge):
     proc = Proc(events(), callback=lambda: bridge._cmd_new(None, "chat", "dsh"))
     with mock.patch.object(bridge.subprocess, "Popen", return_value=proc):
         bridge._run_dsh("hi", "chat")
-    assert not bridge._session_entry("chat", "dsh").get("session_id")
-    assert not bridge._session_entry("chat", "dsh").get("last_used")
+    assert not bridge.sessions.bucket("chat", "dsh").get("session_id")
+    assert not bridge.sessions.bucket("chat", "dsh").get("last_used")
 
 
 def test_dsh_execution_route_and_initial_card(bridge):
@@ -409,7 +409,7 @@ def test_dsh_timeout_cleans_process(bridge, monkeypatch):
         with pytest.raises(subprocess.TimeoutExpired):
             bridge._run_dsh("hi", "chat")
     assert processes[0].poll() is not None
-    assert bridge._active_process is None
+    assert bridge.agent_runner.active_process is None
 
 
 def test_resumed_turn_numbers_are_not_double_counted(bridge):
@@ -418,18 +418,18 @@ def test_resumed_turn_numbers_are_not_double_counted(bridge):
     state.observe({"type": "status", "phase": "step_start", "turn": 2198, "step": 2})
     state.observe({"type": "status", "phase": "turn_start", "turn": 2199})
     assert state.turns == 2
-    bridge._update_chat_stats("chat", state, 3)
-    assert bridge._session_entry("chat", "dsh")["turns_total"] == 2
+    bridge.sessions.update_stats("chat", state, 3)
+    assert bridge.sessions.bucket("chat", "dsh")["turns_total"] == 2
 
 
 def test_default_permission_is_readonly_and_invalid_mode_rejected(bridge, monkeypatch):
     monkeypatch.delenv("CLAUDE_FEISHU_DSH_PERMISSION_MODE", raising=False)
     monkeypatch.setenv("DSH_PERMISSION_MODE", "danger-full-access")
-    assert bridge._build_env("dsh")["DSH_PERMISSION_MODE"] == "read-only"
-    assert "DSH_PERMISSION_MODE" not in bridge._build_env("claude")
+    assert bridge.runner.build_env("dsh")["DSH_PERMISSION_MODE"] == "read-only"
+    assert "DSH_PERMISSION_MODE" not in bridge.runner.build_env("claude")
     monkeypatch.setenv("CLAUDE_FEISHU_DSH_PERMISSION_MODE", "danger-full-access")
     with pytest.raises(ValueError):
-        bridge._build_env("dsh")
+        bridge.runner.build_env("dsh")
 
 
 def test_session_is_bound_before_timeout(bridge, monkeypatch):
@@ -440,8 +440,8 @@ def test_session_is_bound_before_timeout(bridge, monkeypatch):
     )
     with pytest.raises(subprocess.TimeoutExpired):
         bridge._run_dsh("hi", "chat")
-    assert bridge._session_entry("chat", "dsh")["session_id"] == "early"
-    assert bridge._session_entry("chat", "dsh")["cwd"] == "/tmp"
+    assert bridge.sessions.bucket("chat", "dsh")["session_id"] == "early"
+    assert bridge.sessions.bucket("chat", "dsh")["cwd"] == "/tmp"
 
 
 @pytest.mark.parametrize("name", ["claude", "dsh"])

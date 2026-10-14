@@ -84,9 +84,9 @@ class SessionContextTests(unittest.TestCase):
 
     def test_get_or_create_session_persists_mapping(self):
         bridge = self.bridge
-        sid1, new1 = bridge._get_or_create_session("chat-a")
-        sid2, new2 = bridge._get_or_create_session("chat-a")
-        sid3, new3 = bridge._get_or_create_session("chat-b")
+        sid1, new1 = bridge.sessions.get_or_create("chat-a")
+        sid2, new2 = bridge.sessions.get_or_create("chat-a")
+        sid3, new3 = bridge.sessions.get_or_create("chat-b")
         self.assertTrue(new1)
         self.assertFalse(new2)
         self.assertTrue(new3)
@@ -103,7 +103,7 @@ class SessionContextTests(unittest.TestCase):
         saved = bridge.SESSION_CONTEXT_ENABLED
         bridge.SESSION_CONTEXT_ENABLED = False
         try:
-            self.assertEqual(bridge._get_or_create_session("chat-c"), (None, False))
+            self.assertEqual(bridge.sessions.get_or_create("chat-c", enabled=bridge.SESSION_CONTEXT_ENABLED), (None, False))
         finally:
             bridge.SESSION_CONTEXT_ENABLED = saved
 
@@ -233,8 +233,8 @@ class RunClaudeProgressTests(unittest.TestCase):
         # bridge.time 就是全局 time 模块，改它会连 queue.Queue 内部的超时计算
         # 一起改掉，导致队列永不返回（实测把测试挂死）。
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=fake),
             mock.patch.object(bridge, "STREAM_INTERVAL", 0.05),
         ):
@@ -271,8 +271,8 @@ class RunClaudeProgressTests(unittest.TestCase):
         ]
         fake = self._stream_proc(events)
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=fake),
         ):
             _, state = bridge._run_claude("p", "chat")
@@ -314,23 +314,23 @@ class RunClaudeProgressTests(unittest.TestCase):
 
     def test_tool_summary_falls_back_and_caps_length(self):
         bridge = self.bridge
-        self.assertEqual(bridge._tool_summary({"name": "Bash", "input": {}}), "Bash")
+        self.assertEqual(bridge.presentation._tool_summary({"name": "Bash", "input": {}}), "Bash")
         self.assertEqual(
-            bridge._tool_summary({"name": "Custom", "input": {"a": 1}}), 'Custom: {"a": 1}'
+            bridge.presentation._tool_summary({"name": "Custom", "input": {"a": 1}}), 'Custom: {"a": 1}'
         )
         long_cmd = "x" * 500
-        summary = bridge._tool_summary({"name": "Bash", "input": {"command": long_cmd}})
-        self.assertLessEqual(len(summary), len("Bash: ") + bridge._TOOL_DETAIL_MAX + 1)
+        summary = bridge.presentation._tool_summary({"name": "Bash", "input": {"command": long_cmd}})
+        self.assertLessEqual(len(summary), len("Bash: ") + bridge.presentation._TOOL_DETAIL_MAX + 1)
         self.assertTrue(summary.endswith("…"))
 
     def test_steps_history_is_capped(self):
         bridge = self.bridge
         state = bridge.RunState()
-        for i in range(bridge.STEPS_MAX + 10):
+        for i in range(bridge.presentation.STEPS_MAX + 10):
             state.observe({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Read", "input": {"file_path": f"/f{i}"}}]}})
-        self.assertEqual(len(state.steps), bridge.STEPS_MAX)
-        self.assertIn(f"/f{bridge.STEPS_MAX + 9}", state.steps[-1])
+        self.assertEqual(len(state.steps), bridge.presentation.STEPS_MAX)
+        self.assertIn(f"/f{bridge.presentation.STEPS_MAX + 9}", state.steps[-1])
 
     def test_card_titles_carry_duration(self):
         """回归：耗时进主标题（执行中/执行完成都带），正文不重复。"""
@@ -348,9 +348,9 @@ class RunClaudeProgressTests(unittest.TestCase):
 
     def test_fmt_duration_uses_min_and_seconds(self):
         bridge = self.bridge
-        self.assertEqual(bridge._fmt_duration(45), "45s")
-        self.assertEqual(bridge._fmt_duration(65), "1min05s")
-        self.assertEqual(bridge._fmt_duration(3600), "60min00s")
+        self.assertEqual(bridge.presentation._fmt_duration(45), "45s")
+        self.assertEqual(bridge.presentation._fmt_duration(65), "1min05s")
+        self.assertEqual(bridge.presentation._fmt_duration(3600), "60min00s")
 
     def test_context_ignores_result_cumulative_usage(self):
         """回归：result 的 usage 是整轮各次调用之和（实测 19998+182+9268=29448），
@@ -456,8 +456,8 @@ class RunClaudeProgressTests(unittest.TestCase):
         ]
         fake = self._stream_proc(events, rc=-signal.SIGTERM)
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=fake),
         ):
             out, state = bridge._run_claude("p", "chat")
@@ -470,10 +470,10 @@ class RunClaudeProgressTests(unittest.TestCase):
         events = [json.dumps({"type": "system", "subtype": "init", "model": "m"})]
         fake = self._stream_proc(events, block_after=True)
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=fake),
-            mock.patch.object(bridge, "_kill_process_group",
+            mock.patch.object(bridge.runner, "kill_process_group",
                               side_effect=lambda p: setattr(p, "returncode", -15)) as kill,
             mock.patch.object(bridge, "EXEC_TIMEOUT", 0.3),
         ):
@@ -519,10 +519,10 @@ class RunClaudeProgressTests(unittest.TestCase):
                 return 0
 
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=Hung()),
-            mock.patch.object(bridge, "_kill_process_group",
+            mock.patch.object(bridge.runner, "kill_process_group",
                               side_effect=lambda p: setattr(p, "returncode", -15)) as kill,
             mock.patch.object(bridge, "EXEC_TIMEOUT", 0.3),
         ):
@@ -561,14 +561,14 @@ class RunClaudeProgressTests(unittest.TestCase):
             def poll(self):
                 return None
 
-        bridge._interrupt_requested.clear()
+        bridge.agent_runner.interrupt_requested.clear()
         with (
-            mock.patch.object(bridge, "_active_process", Running()),
-            mock.patch.object(bridge, "_kill_process_group",
+            mock.patch.object(bridge.agent_runner, "active_process", Running()),
+            mock.patch.object(bridge.runner, "kill_process_group",
                               side_effect=lambda p: setattr(p, "returncode", -15)),
         ):
             self.assertTrue(bridge._request_interrupt())
-        self.assertTrue(bridge._interrupt_requested.is_set())
+        self.assertTrue(bridge.agent_runner.interrupt_requested.is_set())
 
     def test_request_interrupt_kills_active_process(self):
         """打断不走 _lock：只要能拿到 _active_process 就终止其进程组。"""
@@ -581,8 +581,8 @@ class RunClaudeProgressTests(unittest.TestCase):
                 return None
 
         with (
-            mock.patch.object(bridge, "_active_process", Running()),
-            mock.patch.object(bridge, "_kill_process_group",
+            mock.patch.object(bridge.agent_runner, "active_process", Running()),
+            mock.patch.object(bridge.runner, "kill_process_group",
                               side_effect=lambda p: setattr(p, "returncode", -15)) as kill,
         ):
             self.assertTrue(bridge._request_interrupt())
@@ -590,7 +590,7 @@ class RunClaudeProgressTests(unittest.TestCase):
 
     def test_request_interrupt_noop_without_process(self):
         bridge = self.bridge
-        with mock.patch.object(bridge, "_active_process", None):
+        with mock.patch.object(bridge.agent_runner, "active_process", None):
             self.assertFalse(bridge._request_interrupt())
 
 
@@ -652,7 +652,7 @@ class RichOutputTests(unittest.TestCase):
         out = state.latest_output()
         self.assertTrue(out.startswith("…"), out)
         self.assertIn("字199", out)
-        self.assertLessEqual(len(out), bridge.OUTPUT_MAX + 1)
+        self.assertLessEqual(len(out), bridge.presentation.OUTPUT_MAX + 1)
 
     def test_streaming_thinking_is_shown(self):
         bridge = self.bridge
@@ -678,7 +678,7 @@ class RichOutputTests(unittest.TestCase):
             mock.patch.object(bridge, "_run_claude", return_value=(long_answer, state)),
             mock.patch.object(bridge, "_post_card_reply", return_value="mid-1"),
             mock.patch.object(bridge, "_patch_card", return_value=True),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge, "_send_reply",
                               side_effect=lambda d, t: sent.append(t) or True),
         ):
@@ -719,7 +719,7 @@ class CommandTests(unittest.TestCase):
 
     def setUp(self):
         bridge = self.bridge
-        bridge._chat_sessions.clear()
+        bridge.sessions.chats.clear()
         bridge._chat_queues.clear()
         bridge._drain_running = False
 
@@ -746,11 +746,11 @@ class CommandTests(unittest.TestCase):
 
     def test_new_resets_session_but_keeps_workdir(self):
         bridge = self.bridge
-        bridge._chat_sessions["chat"] = {"session_id": "sid-1", "workdir": "/tmp"}
+        bridge.sessions.chats["chat"] = {"session_id": "sid-1", "workdir": "/tmp"}
         handled, _ = self._run("/new")
         self.assertTrue(handled)
-        self.assertNotIn("session_id", bridge._chat_sessions["chat"])
-        self.assertEqual(bridge._chat_sessions["chat"]["workdir"], "/tmp")
+        self.assertNotIn("session_id", bridge.sessions.chats["chat"])
+        self.assertEqual(bridge.sessions.chats["chat"]["workdir"], "/tmp")
 
     def test_cd_sets_workdir_and_rejects_missing(self):
         bridge = self.bridge
@@ -769,11 +769,11 @@ class CommandTests(unittest.TestCase):
     def test_session_creation_preserves_workdir(self):
         """回归：新建会话时整体覆盖 entry 会丢掉 /cd 设的目录。"""
         bridge = self.bridge
-        with mock.patch.object(bridge, "_persist_sessions"):
-            bridge._chat_sessions["chat"] = {"workdir": "/tmp"}
-            bridge._get_or_create_session("chat")
-        self.assertTrue(bridge._chat_sessions["chat"]["sessions"]["claude"].get("session_id"))
-        self.assertEqual(bridge._chat_sessions["chat"]["workdir"], "/tmp")
+        with mock.patch.object(bridge.sessions, "persist"):
+            bridge.sessions.chats["chat"] = {"workdir": "/tmp"}
+            bridge.sessions.get_or_create("chat")
+        self.assertTrue(bridge.sessions.chats["chat"]["sessions"]["claude"].get("session_id"))
+        self.assertEqual(bridge.sessions.chats["chat"]["workdir"], "/tmp")
 
     def test_queue_reports_position_and_caps(self):
         """上限按"还在队列里的条数"算：消费者取走等锁的那条不再占额度。"""
@@ -811,7 +811,7 @@ class CommandTests(unittest.TestCase):
 
     def test_status_and_cost_render_accumulated_stats(self):
         bridge = self.bridge
-        bridge._chat_sessions["chat"] = {
+        bridge.sessions.chats["chat"] = {
             "session_id": "abcdefgh-1234", "workdir": "/tmp",
             "cost_usd": 0.25, "turns_total": 7, "seconds_total": 120.0, "ctx_used": 200000,
         }
@@ -855,7 +855,7 @@ class AuditFixTests(unittest.TestCase):
         cls.tempdir.cleanup()
 
     def setUp(self):
-        self.bridge._chat_sessions.clear()
+        self.bridge.sessions.chats.clear()
         self.bridge._chat_queues.clear()
 
     # --- P1：异常退出路径不能留下活着的子进程组 ---
@@ -884,10 +884,10 @@ class AuditFixTests(unittest.TestCase):
             proc.returncode = -15
 
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=Stubborn()),
-            mock.patch.object(bridge, "_kill_process_group", side_effect=fake_kill),
+            mock.patch.object(bridge.runner, "kill_process_group", side_effect=fake_kill),
         ):
             with self.assertRaises(subprocess.TimeoutExpired):
                 bridge._run_claude("p", "chat")
@@ -918,10 +918,10 @@ class AuditFixTests(unittest.TestCase):
             proc.returncode = -15
 
         with (
-            mock.patch.object(bridge, "_get_or_create_session", return_value=("sid", False)),
-            mock.patch.object(bridge, "_persist_sessions"),
+            mock.patch.object(bridge.sessions, "get_or_create", return_value=("sid", False)),
+            mock.patch.object(bridge.sessions, "persist"),
             mock.patch.object(bridge.subprocess, "Popen", return_value=Boom()),
-            mock.patch.object(bridge, "_kill_process_group", side_effect=fake_kill),
+            mock.patch.object(bridge.runner, "kill_process_group", side_effect=fake_kill),
             mock.patch.object(bridge.RunState, "observe", side_effect=RuntimeError("boom")),
         ):
             with self.assertRaises(RuntimeError):
@@ -964,9 +964,9 @@ class AuditFixTests(unittest.TestCase):
             try:
                 barrier.wait(timeout=5)
                 for i in range(15):
-                    with bridge._sessions_lock:
-                        bridge._chat_sessions[f"c{n}"] = {"session_id": f"s{n}-{i}"}
-                        bridge._persist_sessions()
+                    with bridge.sessions.lock:
+                        bridge.sessions.chats[f"c{n}"] = {"session_id": f"s{n}-{i}"}
+                        bridge.sessions.persist()
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -988,7 +988,7 @@ class AuditFixTests(unittest.TestCase):
                 seen.append(str(src))
                 return original(src, dst)
             bridge.os.replace = spy
-            bridge._persist_sessions()
+            bridge.sessions.persist()
         finally:
             bridge.os.replace = original
         self.assertTrue(seen and str(threading.get_ident()) in seen[0], seen)
@@ -1014,7 +1014,7 @@ class QueueFifoTests(unittest.TestCase):
 
     def setUp(self):
         bridge = self.bridge
-        bridge._chat_sessions.clear()
+        bridge.sessions.chats.clear()
         bridge._chat_queues.clear()
         bridge._drain_running = False
 

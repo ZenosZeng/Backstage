@@ -28,6 +28,7 @@ OFFLINE_STATUS_SCHEMA = "pi.offline_eval_status.v1"
 OFFLINE_STATUS_DIR = "offline_eval_status"
 STATE_FILE = local_root() / "tools" / "watchdog-train" / "cursors.json"
 TRAIN_PATTERNS = []
+NATIVE_RUNS = []
 KUBECTL_ARGS = []
 ERROR_MARKERS = (
     "Traceback",
@@ -55,32 +56,87 @@ def _run(cmd: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _native_bindings() -> dict[str, dict]:
+    """Bind native jobs to their own launch logs, never to a nearby log mtime."""
+    bindings = {}
+    for run in NATIVE_RUNS:
+        root = pathlib.Path(run["artifact_dir"])
+        for role in ("consumer", "producer"):
+            try:
+                job = (root / f"{role}-job-name.txt").read_text().strip()
+                launch = (root / f"{role}-launch-id.txt").read_text().strip()
+            except OSError:
+                continue
+            if not job or not launch:
+                continue
+            bindings[job] = {
+                "exp_name": root.name,
+                "role": role,
+                "log_dir": root / "logs" / launch,
+                "producers_per_node": run.get("producers_per_node", 1),
+            }
+    return bindings
+
+
+def _job_phase(item: dict) -> str:
+    status = item.get("status", {})
+    conditions = {
+        c["type"] for c in status.get("conditions", []) if c.get("status") == "True"
+    }
+    if conditions & {"Failed", "FailureTarget"}:
+        return "failed"
+    if conditions & {"Complete", "SuccessCriteriaMet"}:
+        return "succeeded"
+    # A failed attempt is not a terminal Job failure when Indexed jobs retry.
+    # Likewise, one completed node is not a completed multi-node training run.
+    expected = item.get("spec", {}).get("completions") or 1
+    if status.get("succeeded", 0) >= expected:
+        return "succeeded"
+    if status.get("active", 0) > 0:
+        return "active"
+    return "pending"
+
+
 def _kubectl_jobs() -> dict[str, dict]:
     """job_name -> {status, start_time, completion_time, exp_name}."""
     out = _run(["kubectl", *KUBECTL_ARGS, "get", "jobs", "-o", "json"])
     jobs: dict[str, dict] = {}
+    bindings = _native_bindings()
     try:
         data = json.loads(out)
         for item in data.get("items", []):
             name = item["metadata"]["name"]
             status = item.get("status", {})
-            if status.get("succeeded", 0) > 0:
-                phase = "succeeded"
-            elif status.get("failed", 0) > 0:
-                phase = "failed"
-            elif status.get("active", 0) > 0:
-                phase = "active"
-            else:
-                phase = "pending"
             jobs[name] = {
-                "status": phase,
+                "status": _job_phase(item),
                 "start_time": item["metadata"].get("creationTimestamp", ""),
+                "ready": status.get("ready", 0),
+                "expected": item.get("spec", {}).get("completions", 1),
+                "failed_attempts": status.get("failed", 0),
+                "reason": "; ".join(
+                    c.get("message", c.get("reason", ""))
+                    for c in status.get("conditions", [])
+                    if c.get("status") == "True"
+                    and c.get("type") in {"Failed", "FailureTarget"}
+                ),
+                "gpus_per_node": sum(
+                    int(
+                        c.get("resources", {})
+                        .get("limits", {})
+                        .get("nvidia.com/gpu", 0)
+                    )
+                    for c in item.get("spec", {})
+                    .get("template", {})
+                    .get("spec", {})
+                    .get("containers", [])
+                ),
                 # kjob records the launch script here; used for deterministic
                 # exp-name resolution (see below).
                 "script": item["metadata"]
                 .get("annotations", {})
                 .get("kjobctl.x-k8s.io/script", ""),
                 "exp_name": "",  # resolved from the script first, then legacy mtime matching
+                **bindings.get(name, {}),
             }
     except Exception:  # noqa: BLE001
         pass
@@ -124,6 +180,8 @@ def _kubectl_jobs() -> dict[str, dict]:
     # training exp scripts are eligible; everything else falls through to the
     # legacy mtime matching below.
     for job in jobs.values():
+        if job.get("exp_name"):
+            continue
         script_rel = job.get("script", "")
         if "/exp/" not in script_rel:
             continue
@@ -330,7 +388,7 @@ def _offline_progress(exp_name: str, *, now: float | None = None) -> dict | None
     }
 
 
-def _load_state() -> dict[str, int]:
+def _load_state() -> dict:
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -339,7 +397,7 @@ def _load_state() -> dict[str, int]:
     return {}
 
 
-def _save_state(state: dict[str, int]) -> None:
+def _save_state(state: dict) -> None:
     atomic_json(STATE_FILE, state)
 
 
@@ -398,6 +456,38 @@ def _append_progress(lines: list[str], progress: dict, *, precise: bool) -> None
             lines.append(f"- 当前: {visible}")
         return
 
+    if progress.get("type") == "susser_train":
+        precise = True
+        if not progress.get("step"):
+            lines.append("- 训练: 尚未产出 step，正在启动或等待供数")
+            return
+        seconds = progress["step_seconds"]
+        lines.append(f"- 步速: {seconds:.3f} s/step（最近日志窗口）")
+        lines.append(f"- LR: {progress.get('lr', '?')}")
+        age = max(0, time.time() - progress["last_step_time"])
+        lines.append(f"- 最近训练进度: {age:.0f} 秒前")
+        if age < STALL_WARNING_MIN * 60 and progress.get("total"):
+            eta = (
+                dt.datetime.fromtimestamp(
+                    time.time() + max(0, progress["total"] - progress["step"]) * seconds
+                )
+                .astimezone()
+                .strftime("%m-%d %H:%M %Z")
+            )
+            lines.append(f"- 预计完成: {eta}（按步速估计，另计保存和排队）")
+        else:
+            lines.append("- 预计完成: 等待进度恢复后重算")
+        checkpoints = progress.get("checkpoints", {})
+        if checkpoints:
+            saved = " / ".join(
+                f"{kind}: step {step}" for kind, step in checkpoints.items()
+            )
+            lines.append(f"- checkpoint 保存日志: {saved}（未自动核验 S3 完整性）")
+        if not progress.get("total"):
+            lines.append(f"- 进度 step: {progress['step']}（总步数尚未读到）")
+            lines.append(f"- Loss: {progress['loss']}")
+            return
+
     epoch_s = (
         f"{progress['epoch'][0]:.2f}/{progress['epoch'][1]}"
         if progress["epoch"][0] is not None and precise
@@ -406,11 +496,17 @@ def _append_progress(lines: list[str], progress: dict, *, precise: bool) -> None
         else "?"
     )
     pct = progress["step"] / progress["total"] * 100
-    remaining_h = (progress["total"] - progress["step"]) / progress["its"] / 3600
+    remaining_h = max(0, progress["total"] - progress["step"]) / progress["its"] / 3600
     pct_text = f"{pct:.1f}" if precise else f"{pct:.0f}"
     lines.append(f"- 进度 epoch: {epoch_s}")
     lines.append(f"- 进度 step: {progress['step']}/{progress['total']} ({pct_text}%)")
-    lines.append(f"- ETA: 已跑 {progress['elapsed_h']:.1f}h / 剩 {remaining_h:.1f}h")
+    remaining = (
+        "等待恢复"
+        if progress.get("type") == "susser_train"
+        and time.time() - progress["last_step_time"] >= STALL_WARNING_MIN * 60
+        else f"{remaining_h:.1f}h"
+    )
+    lines.append(f"- ETA: 已跑 {progress['elapsed_h']:.1f}h / 剩 {remaining}")
     lines.append(f"- Loss: {progress['loss']}")
 
 
@@ -427,8 +523,11 @@ class TrainMonitor:
     def __init__(self, sender=None) -> None:
         self.sender = sender or (lambda kind, body: False)
         self._err_state = _load_state()
+        self._native_progress_state = self._err_state.setdefault("susser_progress", {})
         self._known_jobs: dict[str, str] = {}  # job_name -> last phase notified
         self._stalled_reported: dict[str, str] = {}
+        self._failed_attempts: dict[str, int] = {}
+        self._missing_jobs: set[str] = set()
         self._initialized = False  # first scan builds baseline, emits nothing
 
     # -- event scan ----------------------------------------------------------
@@ -443,26 +542,78 @@ class TrainMonitor:
             phase = job["status"]
             prev = self._known_jobs.get(job_name)
             exp = job.get("exp_name", "")
-            if prev is None and phase == "active":
+            extra = self._job_details(job_name, job, jobs) if job.get("role") else []
+            if job.get("role"):
+                self._failed_attempts.setdefault(job_name, job["failed_attempts"])
+            if prev is None and phase in {"active", "pending"}:
                 self._known_jobs[job_name] = "running"
                 if not self._initialized:
                     continue  # baseline: existed before we started watching
-                events.append(("start", job_name, exp, self._progress_of(exp), []))
+                events.append(("start", job_name, exp, self._progress_of(exp), extra))
             elif prev in ("running", "active") and phase == "succeeded":
                 self._known_jobs[job_name] = "finished"
-                events.append(("finished", job_name, exp, self._progress_of(exp), []))
+                events.append(
+                    ("finished", job_name, exp, self._progress_of(exp), extra)
+                )
             elif prev in ("running", "active") and phase == "failed":
                 self._known_jobs[job_name] = "failed"
-                events.append(("failed", job_name, exp, self._progress_of(exp), []))
+                events.append(("failed", job_name, exp, self._progress_of(exp), extra))
             elif prev is None and phase == "failed":
                 # appeared already failed (e.g. quick crash)
                 self._known_jobs[job_name] = "failed"
                 if not self._initialized:
                     continue
-                events.append(("failed", job_name, exp, self._progress_of(exp), []))
+                events.append(("failed", job_name, exp, self._progress_of(exp), extra))
+            if job.get("role"):
+                failures = job["failed_attempts"]
+                old_failures = self._failed_attempts.get(job_name, failures)
+                self._failed_attempts[job_name] = failures
+                if phase in {"active", "pending"} and failures > old_failures:
+                    events.append(
+                        (
+                            "warning",
+                            job_name,
+                            exp,
+                            self._progress_of(exp),
+                            extra
+                            + [
+                                (
+                                    "重试",
+                                    f"失败尝试 {old_failures} → {failures}；Job 尚未终止",
+                                )
+                            ],
+                        )
+                    )
+        for job_name, binding in _native_bindings().items():
+            if job_name in jobs:
+                self._missing_jobs.discard(job_name)
+            elif (
+                self._known_jobs.get(job_name) == "running"
+                and job_name not in self._missing_jobs
+                and any(
+                    job.get("exp_name") == binding["exp_name"]
+                    and job.get("status") in {"active", "pending"}
+                    for job in jobs.values()
+                )
+            ):
+                self._missing_jobs.add(job_name)
+                events.append(
+                    (
+                        "failed",
+                        job_name,
+                        binding["exp_name"],
+                        self._progress_of(binding["exp_name"]),
+                        [
+                            (
+                                "故障",
+                                f"已监控的 {binding['role']} Job 消失，同一 run 的另一组仍在运行",
+                            ),
+                        ],
+                    )
+                )
         self._initialized = True
         # 2. log errors -> failed
-        for kind, _, exp, progress, extra in self._scan_err_events():
+        for kind, _, exp, progress, extra in self._scan_err_events(jobs):
             events.append((kind, "", exp, progress, extra))
         # 3. stall -> failed (after critical threshold)
         for kind, _, exp, progress, extra in self._check_stall_events(jobs):
@@ -470,17 +621,33 @@ class TrainMonitor:
 
         for kind, job_id, exp, progress, extra in events:
             self._emit(kind, job_id, exp, progress, extra)
+        _save_state(self._err_state)
         return []
 
     # -- log err scan --------------------------------------------------------
-    def _scan_err_events(self):
+    def _scan_err_events(self, jobs=None):
         events = []
         # 训练日志 jobs-*.err + 离线评测日志 offline-eval-*.err（P5 接入）
-        err_files = sorted(
-            list(KJOB_LOG.glob("jobs-*.err"))
-            + list(KJOB_LOG.glob("offline-eval-*.err"))
-        )
-        for err_path in err_files:
+        err_files = [
+            (path, None)
+            for path in sorted(
+                list(KJOB_LOG.glob("jobs-*.err"))
+                + list(KJOB_LOG.glob("offline-eval-*.err"))
+            )
+        ]
+        for job_name, binding in _native_bindings().items():
+            if jobs is not None and jobs.get(job_name, {}).get("status") not in {
+                "active",
+                "pending",
+            }:
+                continue
+            err_files.extend(
+                (path, binding)
+                for path in sorted(
+                    binding["log_dir"].glob(f"{binding['role']}-node_*.log")
+                )
+            )
+        for err_path, binding in err_files:
             key = str(err_path)
             size = err_path.stat().st_size
             if key not in self._err_state:
@@ -490,10 +657,70 @@ class TrainMonitor:
             if size <= offset:
                 self._err_state[key] = size
                 continue
+            previous_line = ""
             with err_path.open("rb") as fh:
+                if binding:
+                    # Keep the preceding warning available across polls/restarts.
+                    fh.seek(max(0, offset - 512))
+                    context = fh.read(offset - fh.tell()).decode(errors="ignore")
+                    context_lines = re.sub(r"\x1b\[[0-9;]*m", "", context).splitlines()
+                    previous_line = context_lines[-1] if context_lines else ""
                 fh.seek(offset)
-                new_text = fh.read(size - offset).decode(errors="ignore")
-            self._err_state[key] = size
+                new_bytes = fh.read(size - offset)
+            if binding:
+                # Do not consume a warning/traceback header before its newline.
+                complete = new_bytes.rfind(b"\n") + 1
+                self._err_state[key] = offset + complete
+                new_text = new_bytes[:complete].decode(errors="ignore")
+            else:
+                self._err_state[key] = size
+                new_text = new_bytes.decode(errors="ignore")
+            if binding:
+                # These logs mix warnings, handled corrupt samples and real errors.
+                # A retrying worker is an orange warning; Job conditions decide death.
+                lines = re.sub(r"\x1b\[[0-9;]*m", "", new_text).splitlines()
+                error_line = None
+                for line in lines:
+                    handled_tag_retry = (
+                        binding["role"] == "producer"
+                        and line == "Traceback (most recent call last):"
+                        and previous_line
+                        == "WARNING:lakestream.core:Transient failure while reading consumer tags; retrying"
+                    )
+                    previous_line = line
+                    if (
+                        not handled_tag_retry
+                        and re.search(
+                            r"Traceback \(most recent call last\)|CUDA out of memory|ChildFailedError|"
+                            r" - ERROR - |^ERROR:|DATA_STALL",
+                            line,
+                        )
+                        and not any(
+                            marker in line
+                            for marker in (
+                                "CORRUPT_VIDEO_GOP",
+                                "REPLACED_INVALID_SAMPLE",
+                            )
+                        )
+                    ):
+                        error_line = line
+                        break
+                if error_line:
+                    exp = binding["exp_name"]
+                    events.append(
+                        (
+                            "warning",
+                            "",
+                            exp,
+                            self._progress_of(exp),
+                            [
+                                ("角色", binding["role"]),
+                                ("日志", err_path.name),
+                                ("异常日志", error_line.strip()[:200]),
+                            ],
+                        )
+                    )
+                continue
             for marker in ERROR_MARKERS:
                 if marker in new_text:
                     line = next(
@@ -510,7 +737,6 @@ class TrainMonitor:
                         )
                     )
                     break
-        _save_state(self._err_state)
         return events
 
     # -- stall ---------------------------------------------------------------
@@ -520,7 +746,9 @@ class TrainMonitor:
         active_experiments = {
             str(job.get("exp_name", ""))
             for job in jobs.values()
-            if job.get("status") == "active" and job.get("exp_name")
+            if job.get("status") == "active"
+            and job.get("exp_name")
+            and job.get("role") != "producer"
         }
         patterns = dict(TRAIN_PATTERNS)
         for name in list(self._stalled_reported):
@@ -529,16 +757,20 @@ class TrainMonitor:
         for name in sorted(active_experiments):
             if name.startswith("offline-eval-"):
                 continue
-            err_path = (
-                _latest_err(patterns[name])
-                if name in patterns
-                else _latest_train_err(name)
-            )
-            if err_path is None:
-                continue
-            age_min = (now - err_path.stat().st_mtime) / 60
-            if _tqdm_fields(err_path) is None:
-                continue
+            progress = self._progress_of(name)
+            if progress and progress.get("type") == "susser_train":
+                if not progress.get("step"):
+                    continue
+                age_min = max(0, now - progress["last_step_time"]) / 60
+            else:
+                err_path = (
+                    _latest_err(patterns[name])
+                    if name in patterns
+                    else _latest_train_err(name)
+                )
+                if err_path is None or not progress:
+                    continue
+                age_min = (now - err_path.stat().st_mtime) / 60
             previous = self._stalled_reported.get(name)
             if age_min >= STALL_FAIL_MIN:
                 if previous != "failed":
@@ -547,7 +779,7 @@ class TrainMonitor:
                             "failed",
                             "",
                             name,
-                            _tqdm_fields(err_path),
+                            progress,
                             [("故障", f"进度 {age_min:.0f} 分钟未更新")],
                         )
                     )
@@ -559,7 +791,7 @@ class TrainMonitor:
                             "stalled",
                             "",
                             name,
-                            _tqdm_fields(err_path),
+                            progress,
                             [("停滞", f"进度 {age_min:.0f} 分钟未更新")],
                         )
                     )
@@ -609,6 +841,109 @@ class TrainMonitor:
         return events
 
     # -- helpers -------------------------------------------------------------
+    def _native_progress(self, path: pathlib.Path) -> dict | None:
+        """Incrementally parse rank 0 metrics and synchronous checkpoint saves."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        key = str(path)
+        state = self._native_progress_state.setdefault(key, {})
+        if size < state.get("offset", 0):
+            state.clear()
+        with path.open("rb") as fh:
+            fh.seek(state.get("offset", 0))
+            text = state.pop("partial", "") + fh.read(
+                size - state.get("offset", 0)
+            ).decode(errors="replace")
+        text, _, partial = text.rpartition("\n")
+        state.update(offset=size, partial=partial)
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        for field in ("steps_per_epoch", "total_steps"):
+            match = re.search(rf'"{field}"\s*:\s*(\d+)', text)
+            if match:
+                state[field] = int(match.group(1))
+        wandb = re.search(r"https://wandb\.ai/[^\s]+/runs/[^\s]+", text)
+        if wandb:
+            state["wandb"] = wandb.group(0)
+        for line in text.splitlines():
+            if "[rank 0]" not in line:
+                continue
+            metric = re.search(
+                r"step:\s*(\d+)\s+loss:\s*(\S+).*?step_time:\s*([\d.]+)s.*?lr:\s*(\S+)",
+                line,
+            )
+            if metric and int(metric.group(1)) > state.get("step", 0):
+                timestamp = (
+                    dt.datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f")
+                    .replace(tzinfo=dt.timezone.utc)
+                    .timestamp()
+                )
+                seconds = float(metric.group(3))
+                if seconds > 0:
+                    speeds = state.setdefault("speeds", [])
+                    speeds.append(seconds)
+                    del speeds[:-50]
+                    state.update(
+                        step=int(metric.group(1)),
+                        loss=metric.group(2),
+                        lr=metric.group(4),
+                        last_step_time=timestamp,
+                    )
+                    state.setdefault("first_step_time", timestamp)
+            save = re.search(
+                r"Saving the checkpoint (\d+) into .*?/(training|raw|ema)/step-\d+",
+                line,
+            )
+            if save:
+                state["saving"] = (save.group(2), int(save.group(1)))
+            elif "Finished saving the checkpoint" in line and state.get("saving"):
+                kind, step = state.pop("saving")
+                state.setdefault("checkpoints", {})[kind] = step
+        if not state.get("step"):
+            return {"type": "susser_train", "step": 0}
+        seconds = sum(state["speeds"]) / len(state["speeds"])
+        per_epoch = state.get("steps_per_epoch", 0)
+        total = state.get("total_steps", 0)
+        return {
+            **state,
+            "type": "susser_train",
+            "total": total,
+            "step_seconds": seconds,
+            "its": 1 / seconds,
+            "elapsed_h": max(0, time.time() - state["first_step_time"]) / 3600,
+            "epoch": (state["step"] / per_epoch, total / per_epoch)
+            if per_epoch
+            else (None, None),
+        }
+
+    @staticmethod
+    def _job_details(job_name: str, job: dict, jobs: dict) -> list:
+        extra = [("角色", job["role"])]
+        for name, related in jobs.items():
+            if related.get("exp_name") != job["exp_name"] or not related.get("role"):
+                continue
+            role = related["role"]
+            quantity = (
+                related["gpus_per_node"]
+                if role == "consumer"
+                else related["producers_per_node"]
+            )
+            unit = "GPU" if role == "consumer" else "配置进程"
+            extra.append(
+                (
+                    role,
+                    f"{related['status']} · 就绪 {related['ready']}/{related['expected']} 节点"
+                    f" × {quantity} {unit}/节点 · 失败尝试 {related['failed_attempts']} · {name}",
+                )
+            )
+        for name, binding in _native_bindings().items():
+            if binding["exp_name"] == job["exp_name"] and name not in jobs:
+                extra.append((binding["role"], f"当前查不到 Job · {name}"))
+        if job.get("reason"):
+            extra.append(("Kubernetes 原因", job["reason"][:400]))
+        return extra
+
     def _exp_from_err_path(self, err_path: pathlib.Path) -> str:
         for name, pattern in TRAIN_PATTERNS:
             if pathlib.PurePath(err_path).match(pattern + ".err"):
@@ -620,6 +955,9 @@ class TrainMonitor:
     def _progress_of(self, exp_name: str) -> dict | None:
         if not exp_name:
             return None
+        for binding in _native_bindings().values():
+            if binding["exp_name"] == exp_name and binding["role"] == "consumer":
+                return self._native_progress(binding["log_dir"] / "consumer-node_0.log")
         if exp_name.startswith("offline-eval-"):
             return _offline_progress(exp_name)
         for name, pattern in TRAIN_PATTERNS:
@@ -639,6 +977,7 @@ class TrainMonitor:
             "finished": "结束",
             "failed": "故障",
             "stalled": "停滞",
+            "warning": "警告",
         }.get(kind, kind)
         body = _event_body(job_id, exp, status, progress, extra)
         sent = self.sender(kind, body)
@@ -653,19 +992,35 @@ class TrainMonitor:
         if not jobs:
             return ""
         active_jobs = sorted(
-            (name, job) for name, job in jobs.items() if job["status"] == "active"
+            (name, job)
+            for name, job in jobs.items()
+            if job["status"] in {"active", "pending"}
         )
         blocks: list[str] = []
-        for index, (name, job) in enumerate(active_jobs, start=1):
+        for name, job in active_jobs:
             exp = job.get("exp_name", "")
+            if job.get("role") == "producer" and any(
+                related.get("exp_name") == exp
+                and related.get("role") == "consumer"
+                and related.get("status") in {"active", "pending"}
+                for related in jobs.values()
+            ):
+                continue
             kind = _job_kind(exp)
             progress = self._progress_of(exp) if exp else None
             lines = [
-                f"**job{index}: {exp or name}** - 运行中（{kind}）",
+                f"**job{len(blocks) + 1}: {exp or name}** - {'等待调度' if job['status'] == 'pending' else '运行中'}（{kind}）",
                 f"- kjob: {name}",
             ]
             if progress:
                 _append_progress(lines, progress, precise=False)
+                if progress.get("wandb"):
+                    lines.append(f"- W&B: {progress['wandb']}")
+            if job.get("role"):
+                lines.extend(
+                    f"- {key}: {value}"
+                    for key, value in self._job_details(name, job, jobs)
+                )
             blocks.append("\n".join(lines))
         if not blocks:
             return ""

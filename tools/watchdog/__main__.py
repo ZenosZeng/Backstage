@@ -68,6 +68,27 @@ def factory(kind: str):
             ):
                 raise ValueError("experiments must contain [label, glob] pairs")
             train.TRAIN_PATTERNS = [tuple(item) for item in experiments]
+            native_runs = config.get("native_runs", [])
+            if not isinstance(native_runs, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("artifact_dir"), str)
+                or not item["artifact_dir"].strip()
+                or type(item.get("producers_per_node", 1)) is not int
+                or item.get("producers_per_node", 1) < 1
+                for item in native_runs
+            ):
+                raise ValueError(
+                    "native_runs requires artifact_dir and positive producers_per_node"
+                )
+            train.NATIVE_RUNS = [
+                {
+                    **item,
+                    "artifact_dir": resolve_path(
+                        item["artifact_dir"], config_path.parent
+                    ),
+                }
+                for item in native_runs
+            ]
             flags = config.get("kubectl_args", [])
             allowed = {
                 "--context",

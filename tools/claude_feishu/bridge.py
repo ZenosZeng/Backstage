@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Feishu bot bridge: remote-control Claude Code from a Feishu chat (P4).
+"""Feishu transport, authorization and command routing for Claude / DSH.
 
 双向遥控：在飞书里私聊机器人（或群聊 @它）发指令 → lark-oapi 长连接
-（WS，无需公网回调）接收 → 白名单校验 → 本机 `claude -p` 执行 →
+（WS，无需公网回调）接收 → 白名单校验 → 本机 Agent CLI 执行 →
 结果回复到原消息线程。
 
 安全设计（codex 审计 2026-08-07 后修复）：
@@ -21,20 +21,18 @@ import os
 import sys
 import json
 import time
-import uuid
-import signal
 import hashlib
 import logging
 import pathlib
-import queue
 import shutil
 import subprocess
 import threading
 import urllib.request
 from typing import Callable
-from dataclasses import replace
 
-from tools.claude_feishu import harness
+from tools.claude_feishu import harness, presentation, runner
+from tools.claude_feishu.sessions import SessionStore
+from tools.claude_feishu.presentation import CARD_BODY_MAX
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 HOME_DIR = pathlib.Path.home()
@@ -69,11 +67,6 @@ EXEC_TIMEOUT = int(os.environ.get("CLAUDE_FEISHU_TIMEOUT", "600"))  # 单条指�
 STREAM_INTERVAL = int(os.environ.get(
     "CLAUDE_FEISHU_PROGRESS_INTERVAL", os.environ.get("CLAUDE_FEISHU_STREAM_INTERVAL", "5")
 ))
-THINKING_MAX = 200  # 进度卡片里思考摘要的字数上限（手机端一屏内）
-STEPS_MAX = 40  # RunState 保留的步骤条数（内存上限）
-STEPS_SHOWN = 5  # 进度卡片里展示的最近步骤条数
-OUTPUT_MAX = 320  # 进度卡片里"最新输出"（工具结果/正文）的字数上限
-CARD_BODY_MAX = 3500  # 收尾卡片正文上限，超出部分随后分条补发
 QUEUE_MAX = 5  # 每个 chat 的排队指令上限
 def _read_settings_env() -> dict:
     """~/.claude/settings.json 的 env 块——CLI 实际生效的配置来源。
@@ -110,64 +103,6 @@ DSH_CONTEXT_WINDOW = int(_setting("CLAUDE_FEISHU_DSH_CONTEXT_WINDOW", "0") or 0)
 EFFORT = _setting("CLAUDE_CODE_EFFORT_LEVEL")
 
 
-def _short_path(path: str) -> str:
-    """家目录缩成 ~，标题栏里省地方。"""
-    home = str(HOME_DIR)
-    return "~" + path[len(home):] if path.startswith(home) else path
-
-
-def _clip(text: str, limit: int) -> str:
-    """压掉换行/多空格并截断——卡片一行放不下长文本。"""
-    flat = " ".join(text.split())
-    return flat if len(flat) <= limit else flat[:limit] + "…"
-
-
-def _fmt_duration(elapsed: float) -> str:
-    """执行时长的紧凑写法：min+s 两个单位（2min13s / 45s）。"""
-    mins, secs = divmod(int(elapsed), 60)
-    return f"{mins}min{secs:02d}s" if mins else f"{secs}s"
-
-
-def _clip_tail(text: str, limit: int) -> str:
-    """保留末尾——流式正文/长输出里，最新的部分才是有信息量的。"""
-    text = text.strip()
-    return text if len(text) <= limit else "…" + text[-limit:]
-
-
-# 工具调用摘要里每种工具取哪个入参字段（其余字段对"在干什么"没信息量）
-_TOOL_DETAIL_KEYS = {
-    "Bash": ("command",),
-    "Read": ("file_path",),
-    "Write": ("file_path",),
-    "Edit": ("file_path",),
-    "NotebookEdit": ("notebook_path", "file_path"),
-    "Grep": ("pattern",),
-    "Glob": ("pattern",),
-    "Task": ("description",),
-    "Agent": ("description",),
-    "WebFetch": ("url",),
-    "WebSearch": ("query",),
-    "Skill": ("skill",),
-}
-_TOOL_DETAIL_MAX = 120
-
-
-def _tool_summary(part: dict) -> str:
-    """工具调用的一行摘要：Bash 带命令、Read/Edit 带路径、Grep 带模式。
-
-    只写工具名的话卡片上永远只有"调用 Bash"，看不出在干什么。
-    """
-    name = str(part.get("name") or "?")
-    data = part.get("input") if isinstance(part.get("input"), dict) else {}
-    detail = ""
-    for key in _TOOL_DETAIL_KEYS.get(name, ()):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            detail = value
-            break
-    if not detail and data:
-        detail = json.dumps(data, ensure_ascii=False)
-    return f"{name}: {_clip(detail, _TOOL_DETAIL_MAX)}" if detail else name
 # 打断词：执行中再发这些内容即终止当前进程组（其余消息仍回"忙"提示）
 INTERRUPT_WORDS = {
     w.strip().lower()
@@ -179,7 +114,7 @@ SEEN_FILE = os.environ.get(
     "CLAUDE_FEISHU_STATE", str(HOME_DIR / ".local/state/claude-feishu-seen.json")
 )
 # 会话上下文：按 chat 持久化 claude 原生会话（-r/--session-id），跨消息有上下文。
-# 文件只存 chat_id -> session_id 映射（几十字节），对话本体由 claude 自己管理；
+# 仅保存目录、原生会话 ID 与累计用量；对话本体由各 Agent CLI 自己管理；
 # 设 FEISHU_SESSION_CONTEXT=0 可关闭，退回每次全新会话的旧行为。
 SESSION_FILE = os.environ.get(
     "CLAUDE_FEISHU_SESSIONS", str(HOME_DIR / ".local/state/claude-feishu-sessions.json")
@@ -208,10 +143,6 @@ _queue_lock = threading.Lock()
 _chat_queues: dict[str, deque] = {}  # chat_id -> 排队的 (event, 指令)
 _drain_running = False  # 单消费者：同一时刻最多一个 drain 线程（_queue_lock 保护）
 _token_lock = threading.Lock()
-_process_lock = threading.Lock()
-_stopping = threading.Event()
-_interrupt_requested = threading.Event()  # 本轮的打断请求（跨 _run_claude 传递）
-_active_process = None
 _restart_pending = threading.Event()
 _service_ready: Callable[[], None] | None = None
 _service_config_path: str = ""
@@ -479,321 +410,27 @@ def _patch_card(message_id: str, card: dict) -> bool:
     return ok
 
 
-class RunState:
-    """执行期的可观测状态：模型、思考、当前动作、步骤历史、轮次与用量。
-
-    来源是 claude 的 stream-json 事件；全部字段都是"有则更新"，缺事件不影响
-    最终结果——最终回答始终以 result 事件（或累积文本兜底）为准。
-    """
+class RunState(presentation.RunState):
+    """Bind bridge display settings to one observed Agent run."""
 
     def __init__(self, harness_name: str = "claude") -> None:
-        self.harness = harness_name
-        self.session_id = ""
-        self.cwd = ""
-        self.step = 0
-        self.initial_turn: int | None = None
-        self.context_window = CONTEXT_WINDOW if harness_name == "claude" else DSH_CONTEXT_WINDOW
-        self.events_truncated = False
-        self.stream_error = ""
-        self.terminal_reason = ""
-        self.model = ""
-        self.workdir = ""  # 本次执行的工作目录（/cd 切换后与默认值不同）
-        self.thinking = 0
-        self.thinking_text = ""  # 最新一段思考正文（thinking 块）
-        self.live_thinking = ""  # 正在流式生成的思考（partial messages）
-        self.live_text = ""  # 正在流式生成的正文（partial messages）
-        self.last_result = ""  # 最近一次工具输出（命令输出/报错）
-        self.last_result_error = False
-        self.last_output = ""  # "text" | "result"：最新输出区显示哪个
-        self.action = ""
-        self.steps: list[str] = []  # 滚动步骤历史（工具调用一行摘要）
-        self.turns = 0
-        self.usage: dict = {}  # 最后一次 assistant 调用的用量（= 当前上下文长度）
-        self.total_usage: dict = {}  # result 事件的累计用量（整轮所有调用之和）
-        self.cost: float | None = None
-        self.result: str | None = None
-        self.text_parts: list[str] = []
-        self.returncode: int | None = None
-        self.interrupt_requested = False
-
-    def observe(self, event: dict) -> None:
-        harness.REGISTRY[self.harness].observe(self, event)
-
-    def add_step(self, action: str) -> None:
-        self.action = action
-        self.steps.append(action)
-        del self.steps[:-STEPS_MAX]
-
-    def _observe_claude(self, event: dict) -> None:
-        kind = event.get("type")
-        if kind == "system":
-            if event.get("subtype") == "init":
-                self.model = str(event.get("model") or self.model)
-            elif event.get("subtype") == "thinking_tokens":
-                self.thinking = max(self.thinking, int(event.get("estimated_tokens") or 0))
-        elif kind == "stream_event":
-            self._observe_stream(event.get("event") or {})
-        elif kind == "user":
-            self._observe_tool_result(event)
-        elif kind == "assistant":
-            self.turns += 1
-            msg = event.get("message") or {}
-            # 用量随每条 assistant 事件下发；result 事件要到整轮结束才有，
-            # 只认 result 的话执行中的卡片永远显示不出上下文占比。
-            if isinstance(msg.get("usage"), dict):
-                self.usage = msg["usage"]
-            for part in msg.get("content") or []:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "thinking":
-                    # 思考正文只留最新一段；空块（redacted）不覆盖上一段。
-                    text = str(part.get("thinking") or "").strip()
-                    if text:
-                        self.thinking_text = text
-                elif part.get("type") == "text" and part.get("text"):
-                    self.text_parts.append(str(part["text"]))
-                    self.action = str(part["text"]).strip().splitlines()[0][:120]
-                elif part.get("type") == "tool_use":
-                    self.action = _tool_summary(part)
-                    self.steps.append(self.action)
-                    del self.steps[:-STEPS_MAX]
-        elif kind == "result":
-            self.result = event.get("result") if isinstance(event.get("result"), str) else self.result
-            # result 的 usage 是整轮所有 API 调用的累计值（实测 = 各次 assistant
-            # 之和），不是上下文长度——用它算 ctx 会随调用次数虚高（同一会话里
-            # 3 次调用就 3 倍）。所以只留作统计，占比始终以最后一次 assistant
-            # 事件的 usage 为准。
-            if isinstance(event.get("usage"), dict):
-                self.total_usage = event["usage"]
-            if isinstance(event.get("total_cost_usd"), (int, float)):
-                self.cost = float(event["total_cost_usd"])
-            if isinstance(event.get("num_turns"), int):
-                self.turns = max(self.turns, int(event["num_turns"]))
-
-    def _observe_stream(self, ev: dict) -> None:
-        """partial message 事件（--include-partial-messages）：逐字累积正文/思考。
-
-        有了这个才能在卡片上看到"正在写的字"，而不是每 5 秒才跳一次的快照。
-        """
-        etype = ev.get("type")
-        if etype == "content_block_start":
-            block = ev.get("content_block") or {}
-            if block.get("type") == "text":
-                self.live_text = ""
-            elif block.get("type") == "thinking":
-                self.live_thinking = ""
-        elif etype == "content_block_delta":
-            delta = ev.get("delta") or {}
-            dtype = delta.get("type")
-            if dtype == "text_delta":
-                self.live_text += str(delta.get("text") or "")
-                self.last_output = "text"
-            elif dtype == "thinking_delta":
-                self.live_thinking += str(delta.get("thinking") or "")
-
-    def _observe_tool_result(self, event: dict) -> None:
-        """user 事件里的 tool_result：终端里最常看的东西（命令输出/报错）。"""
-        msg = event.get("message") or {}
-        for part in msg.get("content") or []:
-            if not isinstance(part, dict) or part.get("type") != "tool_result":
-                continue
-            content = part.get("content")
-            if isinstance(content, list):
-                text = "\n".join(
-                    str(block.get("text") or "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
-            else:
-                text = str(content or "")
-            text = text.strip()
-            if not text:
-                continue
-            self.last_result = text
-            self.last_result_error = bool(part.get("is_error"))
-            self.last_output = "result"
-
-    def latest_output(self) -> str:
-        """终端里最常盯的那块：正在写的正文，或最近一次工具输出。"""
-        if self.last_output == "text" and self.live_text.strip():
-            return _clip_tail(self.live_text, OUTPUT_MAX)
-        if self.harness == "dsh" and self.last_output == "result":
-            return self.last_result[:OUTPUT_MAX] + ("…" if len(self.last_result) > OUTPUT_MAX else "")
-        if self.last_output == "result" and self.last_result:
-            return _clip(self.last_result, OUTPUT_MAX)
-        if self.live_text.strip():
-            return _clip_tail(self.live_text, OUTPUT_MAX)
-        return _clip(self.last_result, OUTPUT_MAX) if self.last_result else ""
-
-    def answer(self) -> str:
-        if self.result is not None:
-            return self.result
-        if self.text_parts:
-            return "\n".join(self.text_parts).strip()
-        return self.live_text.strip()  # 只有 partial 事件时兜底
-
-    @property
-    def interrupted(self) -> bool:
-        """本轮是否被 _request_interrupt 打断。
-
-        claude CLI 抓到 SIGTERM 后是自己退出的，rc=143（128+15）而不是 -15，
-        只认负信号值会漏判（实测日志里请求了打断却记成 interrupted=False），
-        所以以显式标记为准、信号值兜底。
-        """
-        if self.interrupt_requested:
-            return True
-        return harness.REGISTRY[self.harness].is_interrupt(self.returncode)
-
-    def progress_md(self, elapsed: float) -> str:
-        """进度卡片正文：统计 + 思考摘要 + 当前动作 + 最近步骤。
-
-        耗时在卡片主标题、模型/effort/路径/上下文占比在副标题，正文都不重复。
-        手机上要短：思考取最新一段的前 THINKING_MAX 字，历史步骤只列最近
-        STEPS_SHOWN 条。
-        """
-        stats = []
-        if self.step:
-            stats.append(f"步骤 {self.step}")
-        if self.turns:
-            stats.append(f"轮次 {self.turns}")
-        if self.thinking >= 1000:
-            stats.append(f"思考 {self.thinking / 1000:.1f}k")
-        elif self.thinking:
-            stats.append(f"思考 {self.thinking}")
-        lines = [" · ".join(stats)] if stats else []
-        # 思考：优先流式缓冲（正在写的那段），其次 assistant 事件里的完整块
-        thinking = self.live_thinking.strip() or self.thinking_text
-        if thinking:
-            lines.append(f"💭 {_clip(thinking, THINKING_MAX)}")
-        if self.action:
-            lines.append(f"- 当前：{self.action}")
-        output = self.latest_output()
-        if output:
-            # 工具输出保留换行（命令回显/报错按行读更清楚），正文压平
-            body = output if self.last_output == "result" else " ".join(output.split())
-            mark = "⚠️ " if self.last_result_error and self.last_output == "result" else ""
-            lines.append("**最新输出**")
-            lines.append(f"{mark}{body}")
-        # 当前动作若是工具调用，已在"当前"行显示，历史里不再重复最后一条
-        history = self.steps[:-1] if self.steps and self.steps[-1] == self.action else self.steps
-        history = history[-STEPS_SHOWN:]
-        if self.events_truncated:
-            lines.append("部分事件已截断，用量可能不完整。")
-        if history:
-            lines.append("**最近步骤**")
-            lines.extend(f"{i}. {s}" for i, s in enumerate(history, 1))
-        return "\n".join(lines)
-
-    def context_used(self) -> int:
-        """本轮上下文占用 = 本轮送进模型的全部 token。
-
-        含未命中缓存的新输入 + 命中缓存的复用部分 + 本轮新建缓存；三者之和
-        才是这次请求实际占用的上下文长度。
-        """
-        return sum(
-            int(self.usage.get(key) or 0)
-            for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        super().__init__(
+            harness_name,
+            context_window=CONTEXT_WINDOW if harness_name == "claude" else DSH_CONTEXT_WINDOW,
+            default_workdir=WORKDIR, home_dir=HOME_DIR, effort=EFFORT,
+            claude_model=_setting("ANTHROPIC_MODEL"),
         )
 
-    def _ctx_text(self) -> str:
-        used = self.context_used()
-        if not used:
-            return ""
-        if not self.context_window:
-            return f"ctx {used / 1000:.0f}k"  # 不知窗口就只报绝对量，不算百分比
-        return f"ctx {used / self.context_window * 100:.0f}%"
 
-    def model_text(self) -> str:
-        """Configured display name; DSH does not report a model in its stream."""
-        configured = os.environ.get(f"CLAUDE_FEISHU_{self.harness.upper()}_MODEL_NAME", "").strip()
-        if configured:
-            return configured
-        if self.harness == "claude":
-            return self.model or _setting("ANTHROPIC_MODEL") or "模型未知"
-        return "模型未配置"
-
-    def location_text(self) -> str:
-        return f"{_short_path(self.workdir or WORKDIR)} · {self._ctx_text() or 'ctx 未知'}"
-
-    def statusline(self) -> str:
-        """Text reply fallback mirrors the card subtitle: model · 目录 · ctx，单行。"""
-        model = self.model_text()
-        if self.harness == "claude":
-            model = f"{model} {EFFORT}".strip()
-        return f"{model} · {self.location_text()}"
+def _short_path(path: str) -> str:
+    return presentation.short_path(path, HOME_DIR)
 
 
-def _usage_note(state: RunState) -> str:
-    """收尾卡脚注：轮次 / 输出 token / 成本（终端里 /cost 给的信息）。"""
-    bits = []
-    if state.turns:
-        bits.append(f"{state.turns} 轮")
-    out_tokens = int((state.total_usage or {}).get("output_tokens") or 0)
-    if out_tokens >= 1000:
-        bits.append(f"输出 {out_tokens / 1000:.1f}k tok")
-    elif out_tokens:
-        bits.append(f"输出 {out_tokens} tok")
-    if state.cost is not None:
-        bits.append(f"${state.cost:.4f}")
-    if state.events_truncated:
-        bits.append("部分事件已截断，用量可能不完整")
-    return " · ".join(bits)
-
-
-def _card(
-    state: RunState, elapsed: float, *, done: str | None = None, starting: bool = False
-) -> dict:
-    """构建进度/结果卡片。done 非空表示收尾态。
-
-    主标题 = harness + 状态 + 耗时；副标题 = 模型 · 目录 · 上下文（飞书 header 只有
-    title + subtitle 两行，三样信息必须合成一行副标题）。
-    进度与收尾两行布局一致，不随正文长度改变。
-    标题按实际结局着色，打断/失败不能顶着绿色的"执行完成"。
-    """
-    label = "Claude" if state.harness == "claude" else "DSH"
-    if done is None:
-        title, template = f"🤖 {label} 执行中 · {_fmt_duration(elapsed)}", "blue"
-        body = "已接收，正在启动…" if starting else state.progress_md(elapsed)
-        elements = [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]
-    else:
-        if state.interrupted:
-            title, template = f"🛑 {label} 已打断", "orange"
-        elif state.returncode not in (0, None):
-            title, template = f"⚠️ {label} 执行失败 (rc={state.returncode})", "red"
-        else:
-            title, template = f"✅ {label} 执行完成", "green"
-        if state.harness == "dsh" and state.returncode not in (0, None) and not state.interrupted and state.terminal_reason:
-            title = f"⚠️ {label} 执行失败 ({state.terminal_reason})"
-        title += f" · {_fmt_duration(elapsed)}"  # 耗时进主标题，正文里不再重复
-        body = (
-            done
-            if len(done) <= CARD_BODY_MAX
-            else done[:CARD_BODY_MAX] + "\n…（正文过长，剩余部分随后发出）"
-        )
-        elements = [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]
-        note = _usage_note(state)
-        if note:
-            elements.append(
-                {"tag": "note", "elements": [{"tag": "plain_text", "content": note}]}
-            )
-    header = {
-        "template": template,
-        "title": {"tag": "plain_text", "content": title},
-    }
-    if _subtitle_supported:
-        header["subtitle"] = {
-            "tag": "plain_text",
-            "content": f"{state.model_text()} · {state.location_text()}",
-        }
-    else:
-        # 服务端不认副标题时，模型与目录/上下文落到正文首两行，信息不丢
-        elements.insert(0, {"tag": "div", "text": {"tag": "plain_text", "content": state.location_text()}})
-        elements.insert(0, {"tag": "div", "text": {"tag": "plain_text", "content": state.model_text()}})
-    return {
-        "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": header,
-        "elements": elements,
-    }
+def _card(state: RunState, elapsed: float, *, done=None, starting=False) -> dict:
+    return presentation.card(
+        state, elapsed, done=done, starting=starting,
+        subtitle_supported=_subtitle_supported,
+    )
 
 
 def _send_reply(data: P2ImMessageReceiveV1, text: str) -> bool:
@@ -811,172 +448,19 @@ def _send_reply(data: P2ImMessageReceiveV1, text: str) -> bool:
 # ---------------------------------------------------------------------------
 # 会话上下文（2026-08-07）：chat_id -> claude session_id
 # 与 seen 账本不同，本文件损坏只丢上下文、不丢安全属性，故 fail-open 仅告警。
-# 命令与执行线程共享状态，读改写和原子落盘由 _sessions_lock 保护。
+# 命令与执行线程共享状态，读改写和原子落盘由 sessions.lock 保护。
 # ---------------------------------------------------------------------------
 
 
-def _normalize_chat(entry: dict) -> dict:
-    legacy_keys = {
-        "session_id",
-        "created_at",
-        "last_used",
-        "cost_usd",
-        "turns_total",
-        "seconds_total",
-        "ctx_used",
-    }
-    entry.setdefault("harness", "claude")
-    buckets = entry.setdefault("sessions", {})
-    if not isinstance(buckets, dict):
-        raise ValueError("sessions must be a dict")
-    if legacy_keys.intersection(entry):
-        bucket = buckets.setdefault("claude", {})
-        for key in legacy_keys:
-            if key in entry:
-                bucket.setdefault(key, entry.pop(key))
-    return entry
+sessions = SessionStore(SESSION_FILE)
+agent_runner = runner.AgentRunner(sessions)
 
 
-def _load_sessions() -> dict[str, dict[str, str]]:
-    state_path = pathlib.Path(SESSION_FILE)
-    if not state_path.exists():
-        return {}
-    try:
-        data = json.loads(state_path.read_text())
-        if data.get("version", 1) == 1:
-            backup = state_path.with_name(state_path.name + ".v1.bak")
-            try:
-                with backup.open("x") as handle:
-                    handle.write(state_path.read_text())
-                os.chmod(backup, 0o600)
-            except FileExistsError:
-                pass
-        chats = data.get("chats", {})
-        if not isinstance(chats, dict):
-            raise ValueError("chats must be a dict")
-        for entry in chats.values():
-            if not isinstance(entry, dict):
-                raise ValueError("chat entry must be a dict")
-            _normalize_chat(entry)
-        return chats
-    except Exception as exc:  # noqa: BLE001
-        logging.warning(
-            "session state unreadable (%s); context will restart fresh", exc
-        )
-        return {}
 
-
-_chat_sessions: dict[str, dict[str, str]] = _load_sessions()
-_sessions_lock = threading.RLock()  # 保护 _chat_sessions 的读改写与落盘
-
-
-def _persist_sessions() -> None:
-    """原子写会话状态。
-
-    审计 P2：命令线程（/cd /new）与执行线程会同时保存，此前共用
-    `.{name}.{pid}.tmp` 一个临时文件名，先 replace 的线程会让另一个抛
-    FileNotFoundError。加锁串行化，并把线程号写进临时名避免互踩。
-    """
-    with _sessions_lock:
-        state_path = pathlib.Path(SESSION_FILE)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = state_path.with_name(
-            f".{state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        payload = {"version": 2, "chats": _chat_sessions}
-        temp_path.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-        os.chmod(temp_path, 0o600)
-        os.replace(temp_path, state_path)
-
-
-def _get_or_create_session(
-    chat_id: str, harness_name: str = "claude"
-) -> tuple[str | None, bool]:
-    if not SESSION_CONTEXT_ENABLED or not chat_id:
-        return None, False
-    with _sessions_lock:
-        bucket = _session_entry(chat_id, harness_name, create=True)
-        if bucket.get("session_id"):
-            return str(bucket["session_id"]), False
-        if harness.REGISTRY[harness_name].session_mode == "capture":
-            return None, False  # DSH can only resume an existing ID.
-        sid = str(uuid.uuid4())
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        bucket.update(
-            session_id=sid, created_at=bucket.get("created_at", now), last_used=now
-        )
-        _persist_sessions()
-        return sid, True
-
-
-def _chat_entry(chat_id: str, *, create: bool = False) -> dict:
-    """该 chat 的持久化条目（会话 id / 工作目录 / 累计统计）。"""
-    with _sessions_lock:
-        entry = _chat_sessions.get(chat_id)
-        if entry is None:
-            if not create or not chat_id:
-                return {}
-            entry = {}
-            _chat_sessions[chat_id] = entry
-        return _normalize_chat(entry)
-
-
-def _chat_harness(chat_id: str) -> str:
-    with _sessions_lock:
-        name = _chat_entry(chat_id).get("harness", "claude")
-        return name if name in harness.REGISTRY else "claude"
-
-
-def _session_entry(chat_id: str, name: str, *, create=False) -> dict:
-    entry = _chat_entry(chat_id, create=create)
-    buckets = entry.get("sessions", {})
-    return buckets.setdefault(name, {}) if create and entry else buckets.get(name, {})
-
-
-def _capture_session(
-    chat_id: str, name: str, session_id: str, workdir: str, epoch: int = 0
-) -> None:
-    if not SESSION_CONTEXT_ENABLED or not chat_id:
-        return
-    with _sessions_lock:
-        bucket = _session_entry(chat_id, name, create=True)
-        if bucket.get("epoch", 0) != epoch:
-            return
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        bucket.update(
-            session_id=session_id,
-            cwd=workdir,
-            created_at=bucket.get("created_at", now),
-            last_used=now,
-        )
-        _persist_sessions()
 
 
 def _chat_workdir(chat_id: str) -> str:
-    """该 chat 的工作目录；/cd 未设过则用默认 WORKDIR。"""
-    entry = _chat_sessions.get(chat_id) or {}
-    workdir = str(entry.get("workdir") or "").strip()
-    return workdir or WORKDIR
-
-
-def _update_chat_stats(chat_id: str, state: RunState, elapsed: float) -> None:
-    """把本轮的成本/上下文/轮次累加进会话条目，供 /cost /status 查询。"""
-    if not chat_id:
-        return
-    with _sessions_lock:
-        entry = _session_entry(chat_id, state.harness, create=True)
-        if state.cost is not None:
-            entry["cost_usd"] = round(float(entry.get("cost_usd") or 0.0) + state.cost, 6)
-        entry["turns_total"] = int(entry.get("turns_total") or 0) + state.turns
-        entry["seconds_total"] = round(float(entry.get("seconds_total") or 0.0) + elapsed, 1)
-        for key, value in state.total_usage.items():
-            if isinstance(value, (int, float)):
-                totals = entry.setdefault("total_usage", {})
-                totals[key] = totals.get(key, 0) + value
-        used = state.context_used()
-        if used:
-            entry["ctx_used"] = used
-        _persist_sessions()
+    return sessions.workdir(chat_id, WORKDIR)
 
 
 # ---------------------------------------------------------------------------
@@ -984,54 +468,24 @@ def _update_chat_stats(chat_id: str, state: RunState, elapsed: float) -> None:
 # ---------------------------------------------------------------------------
 
 # 只保留运行 claude 必需的变量；FEISHU_*/AWS_*/云存储/Coder 凭证一律不带
-_ENV_ALLOW = {
-    "PATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "TZ",
-    "TERM",
-    "KUBECONFIG",
-    "CONDA_OVERRIDE_CUDA",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    "CLAUDE_CODE_EFFORT_LEVEL",
-    "CLAUDE_CODE_SSE_PORT",
-}
-_ENV_ALLOW_PREFIXES = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-)
 
 
-def _build_env(harness_name: str = "claude") -> dict[str, str]:
-    env = {}
-    for key, value in os.environ.items():
-        if key in _ENV_ALLOW | harness.REGISTRY[harness_name].env_allow() or any(
-            key.startswith(p) for p in _ENV_ALLOW_PREFIXES
-        ):
-            env[key] = value
-    if harness_name == "dsh":
-        mode = os.environ.get("CLAUDE_FEISHU_DSH_PERMISSION_MODE", "read-only")
-        if mode not in {"read-only", "workspace-write"}:
-            raise ValueError("invalid DSH permission mode")
-        env["DSH_PERMISSION_MODE"] = mode
-    return env
+def _run_agent(prompt: str, chat_id: str = "", on_progress=None, *, harness_name="claude"):
+    return agent_runner.run(
+        prompt, chat_id, on_progress, harness_name=harness_name,
+        claude_cli=CLAUDE, settings=SETTINGS, default_workdir=WORKDIR,
+        session_context_enabled=SESSION_CONTEXT_ENABLED,
+        timeout=DSH_TIMEOUT if harness_name == "dsh" else EXEC_TIMEOUT,
+        progress_interval=STREAM_INTERVAL, state_factory=RunState,
+    )
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait(timeout=10)
-    except Exception:  # noqa: BLE001 - 进程可能已退出
-        pass
+def _request_interrupt() -> bool:
+    return agent_runner.interrupt()
+
+
+def shutdown() -> None:
+    agent_runner.shutdown()
 
 
 def _run_claude(prompt, chat_id="", on_progress=None):
@@ -1042,268 +496,8 @@ def _run_dsh(prompt, chat_id="", on_progress=None):
     return _run_agent(prompt, chat_id, on_progress, harness_name="dsh")
 
 
-def _run_agent(
-    prompt: str,
-    chat_id: str = "",
-    on_progress: Callable[[RunState, float], None] | None = None,
-    *,
-    harness_name: str = "claude",
-) -> tuple[str, RunState]:
-    """Execute the prompt headless in a fresh process group; returns (回复, 状态)。
-
-    会话上下文：同一 chat 复用 claude 原生会话（新建用 --session-id 固定 id，
-    之后 -r 恢复），对话历史（含工具调用）由 claude 自己持久化并自动压缩。
-    会话被外部清理（~/.claude/projects 被删）时自动重建一次。
-
-    进度：用 --output-format stream-json 逐行读事件（而非 communicate 缓冲到
-    结束），据此每 STREAM_INTERVAL 秒回调一次 on_progress(state, 已等待秒数)；
-    最终回答取 result 事件，缺失时回退到累积文本。总时长不超过 EXEC_TIMEOUT。
-    打断：进程组被外部终止时 stdout 直接 EOF，按中断返回。
-    """
-    global _active_process
-    _interrupt_requested.clear()  # 只算本轮的打断请求
-    workdir = _chat_workdir(chat_id)
-    adapter = harness.REGISTRY[harness_name]
-    if harness_name == "claude":
-        adapter = replace(adapter, binary=CLAUDE)
-    if not adapter.available():
-        failed = RunState(harness_name)
-        failed.returncode = 1
-        return f"本机未安装 {harness_name}", failed
-    timeout = DSH_TIMEOUT if harness_name == "dsh" else EXEC_TIMEOUT
-    epoch = _session_entry(chat_id, harness_name, create=True).get("epoch", 0)
-    retried = False
-    while not _stopping.is_set():
-        session_id, is_new = (
-            _get_or_create_session(chat_id)
-            if harness_name == "claude"
-            else _get_or_create_session(chat_id, harness_name)
-        )
-        cmd = adapter.build_argv(
-            prompt,
-            session_id=session_id,
-            is_new=is_new,
-            workdir=workdir,
-            settings=SETTINGS,
-        )
-        with _process_lock:
-            if _stopping.is_set():
-                return "Service is stopping", RunState(harness_name)
-            proc = subprocess.Popen(
-                cmd,
-                cwd=workdir,
-                env=_build_env(harness_name),
-                stdin=subprocess.PIPE if harness_name == "dsh" else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-            )
-            _active_process = proc
-        state = RunState(harness_name)
-        state.workdir = workdir
-        raw_lines: list[str] = []
-        try:
-            started = time.monotonic()
-            deadline = started + timeout
-
-            # stderr 单独线程抽干，避免子进程写满 stderr 管道后阻塞
-            err_buf: list[str] = []
-
-            def _drain_stderr() -> None:
-                try:
-                    for line in proc.stderr:  # type: ignore[union-attr]
-                        err_buf.append(line)
-                except Exception:  # noqa: BLE001 - 管道关闭即结束
-                    pass
-
-            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-            stderr_thread.start()
-
-            # 读线程 + 队列：超时与进度回调不能依赖"有输出"——claude 挂住不产出时
-            # 直接 for line in proc.stdout 会永久阻塞，EXEC_TIMEOUT 永远不触发。
-            lines_q: queue.Queue = queue.Queue()
-
-            def _pump_stdout() -> None:
-                try:
-                    for raw in proc.stdout:  # type: ignore[union-attr]
-                        lines_q.put(raw)
-                except Exception:  # noqa: BLE001 - 管道关闭即结束
-                    pass
-                finally:
-                    lines_q.put(None)
-
-            threading.Thread(target=_pump_stdout, daemon=True).start()
-            if harness_name == "dsh":
-
-                def _send_task(task_proc=proc):
-                    try:
-                        task_proc.stdin.write(prompt)
-                        task_proc.stdin.close()
-                    except (BrokenPipeError, OSError, ValueError):
-                        pass
-
-                threading.Thread(target=_send_task, daemon=True).start()
-
-            last_tick = started
-            saw_event = False
-            while True:
-                now = time.monotonic()
-                if now >= deadline:
-                    _kill_process_group(proc)
-                    raise subprocess.TimeoutExpired(cmd, timeout)
-                try:
-                    line = lines_q.get(timeout=min(1.0, max(0.05, deadline - now)))
-                except queue.Empty:
-                    if (
-                        on_progress
-                        and STREAM_INTERVAL > 0
-                        and now - last_tick >= STREAM_INTERVAL
-                    ):
-                        last_tick = now
-                        try:
-                            on_progress(state, now - started)
-                        except Exception:  # noqa: BLE001 - 提醒失败不中断执行
-                            logging.warning("progress notify failed", exc_info=True)
-                    continue
-                if line is None:  # stdout EOF
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                raw_lines.append(line)
-                if line.startswith("{"):
-                    try:
-                        event = json.loads(line)
-                        if not isinstance(event, dict):
-                            continue
-                        captured = adapter.session_from_event(event)
-                        if captured:
-                            _capture_session(
-                                chat_id,
-                                harness_name,
-                                captured,
-                                str(event.get("cwd") or workdir),
-                                epoch,
-                            )
-                        state.observe(event)
-                        saw_event = True
-                    except (ValueError, TypeError):
-                        pass  # 非 JSON 或结构异常的行忽略，不影响最终结果
-                now = time.monotonic()
-                if (
-                    on_progress
-                    and STREAM_INTERVAL > 0
-                    and now - last_tick >= STREAM_INTERVAL
-                ):
-                    last_tick = now
-                    try:
-                        on_progress(state, now - started)
-                    except Exception:  # noqa: BLE001 - 提醒失败不中断执行
-                        logging.warning("progress notify failed", exc_info=True)
-            try:
-                proc.wait(timeout=min(30, max(0.05, deadline - time.monotonic())))
-            except subprocess.TimeoutExpired:
-                # stdout 已 EOF 但进程没退（审计 P1：这里曾直接抛出，进程组
-                # 没人清、_active_process 又被置空，留下失控子进程还回"已终止"）
-                logging.error(
-                    "%s 未随 stdout 关闭退出，终止进程组 pid=%s", harness_name, proc.pid
-                )
-                _kill_process_group(proc)
-                raise
-            state.returncode = proc.returncode
-            state.interrupt_requested = _interrupt_requested.is_set()
-            stderr_thread.join(timeout=1)
-            err = "".join(err_buf).strip()
-            logging.info(
-                "%s exited rc=%s events=%s turns=%s interrupted=%s",
-                harness_name,
-                proc.returncode,
-                saw_event,
-                state.turns,
-                state.interrupted,
-            )
-        finally:
-            with _process_lock:
-                if _active_process is proc:
-                    _active_process = None
-            # 兜底（审计 P1）：任何异常退出路径都不许留下活着的子进程组
-            if proc.poll() is None:
-                logging.warning(
-                    "异常路径下 %s 仍存活，终止进程组 pid=%s", harness_name, proc.pid
-                )
-                _kill_process_group(proc)
-        out = state.answer().strip()
-        if not out and err:
-            out = err[-1500:]  # 无 result 事件时回落到 stderr 摘要
-        if proc.returncode != 0:
-            # 会话文件被外部删除（如手动清理 ~/.claude/projects）：摘除映射重建一次
-            if (
-                not retried
-                and not is_new
-                and session_id
-                and _session_entry(chat_id, harness_name).get("epoch", 0) == epoch
-                and adapter.recoverable(err or state.stream_error)
-            ):
-                logging.warning(
-                    "%s session unavailable; recreating (chat=%s)",
-                    harness_name,
-                    chat_id or "?",
-                )
-                with _sessions_lock:
-                    bucket = _session_entry(chat_id, harness_name)
-                    if bucket.get("epoch", 0) != epoch:
-                        return (out or "(无输出)"), state
-                    bucket.pop("session_id", None)
-                    _persist_sessions()
-                retried = True
-                continue
-            return (
-                f"⚠️ {harness_name} 执行失败 (rc={proc.returncode})\n```\n{(state.stream_error or err or state.terminal_reason or out)[:1500]}\n```",
-                state,
-            )
-        if session_id or state.session_id:
-            with _sessions_lock:
-                entry = _session_entry(chat_id, harness_name)
-                if entry and entry.get("epoch", 0) == epoch:
-                    entry["last_used"] = time.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                    )
-                    _persist_sessions()
-        return (out or "(无输出)"), state
-    return "Service is stopping", RunState(harness_name)
-
-
-def _request_interrupt() -> bool:
-    """终止当前执行的进程组；没有在跑的进程返回 False。
-
-    特意绕开 _lock：执行期间 _execute_and_reply 一直持锁，打断消息必须能
-    直接够到 _active_process，否则只能回一句"忙"。
-    """
-    with _process_lock:
-        proc = _active_process
-    if proc is None or proc.poll() is not None:
-        return False
-    # 先立标记再杀：CLI 会捕获 SIGTERM 并以 rc=143 正常退出，光看 returncode
-    # 分不出"被我们打断"和"自己失败退出"。
-    _interrupt_requested.set()
-    logging.info("interrupt requested; killing process group pid=%s", proc.pid)
-    _kill_process_group(proc)
-    return True
-
-
 def _is_interrupt(text: str) -> bool:
     return text.strip().lower() in INTERRUPT_WORDS
-
-
-def shutdown() -> None:
-    """Stop only the remote command group owned by this bridge."""
-    _stopping.set()
-    with _process_lock:
-        proc = _active_process
-    if proc is not None and proc.poll() is None:
-        _kill_process_group(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -1399,15 +593,15 @@ def _cmd_harness(data, chat_id, name, arg=""):
             "❌ 本机没有找到 dsh（未配置 DSH_CLI，PATH 里也没有）。装好后重启服务即可用；现在继续走 /claude。",
         )
         return
-    with _sessions_lock:
-        _chat_entry(chat_id, create=True)["harness"] = name
-        sid = _session_entry(chat_id, name).get("session_id")
-        _persist_sessions()
+    with sessions.lock:
+        sessions.entry(chat_id, create=True)["harness"] = name
+        sid = sessions.bucket(chat_id, name).get("session_id")
+        sessions.persist()
     _send_reply(data, f"已切换到 {name}；会话：{sid or '下条指令新建'}。")
 
 
 def _cmd_status(data: P2ImMessageReceiveV1, chat_id: str) -> None:
-    selected = _chat_harness(chat_id)
+    selected = sessions.harness_name(chat_id)
     lines = [
         "📊 **会话状态**",
         f"- 当前 harness：{selected}",
@@ -1415,7 +609,7 @@ def _cmd_status(data: P2ImMessageReceiveV1, chat_id: str) -> None:
         f"- 队列：{_queue_position(chat_id)} 条待执行",
     ]
     for name in ("claude", "dsh"):
-        entry = _session_entry(chat_id, name)
+        entry = sessions.bucket(chat_id, name)
         used = int(entry.get("ctx_used") or 0)
         ctx = (
             f"{used / CONTEXT_WINDOW * 100:.0f}%（{used / 1000:.0f}k）"
@@ -1446,8 +640,8 @@ def _cmd_status(data: P2ImMessageReceiveV1, chat_id: str) -> None:
 
 
 def _cmd_cost(data: P2ImMessageReceiveV1, chat_id: str) -> None:
-    name = _chat_harness(chat_id)
-    entry = _session_entry(chat_id, name)
+    name = sessions.harness_name(chat_id)
+    entry = sessions.bucket(chat_id, name)
     other = "claude" if name == "dsh" else "dsh"
     cost = (
         f"${float(entry.get('cost_usd') or 0):.4f}"
@@ -1461,7 +655,7 @@ def _cmd_cost(data: P2ImMessageReceiveV1, chat_id: str) -> None:
         f"- 轮次：{int(entry.get('turns_total') or 0)}\n"
         f"- 输出：{output} tok\n- 成本：{cost}\n"
         f"- 执行时长：{float(entry.get('seconds_total') or 0) / 60:.1f}min\n"
-        f"另一边 {other} 累计 {_session_entry(chat_id, other).get('turns_total', 0)} 轮；/{other} 后 /cost 查看。",
+        f"另一边 {other} 累计 {sessions.bucket(chat_id, other).get('turns_total', 0)} 轮；/{other} 后 /cost 查看。",
     )
 
 
@@ -1474,10 +668,10 @@ def _cmd_cd(data: P2ImMessageReceiveV1, chat_id: str, arg: str) -> None:
         _send_reply(data, f"❌ 目录不存在：{arg}")
         return
     resolved = str(target.resolve())
-    with _sessions_lock:
-        entry = _chat_entry(chat_id, create=True)
+    with sessions.lock:
+        entry = sessions.entry(chat_id, create=True)
         entry["workdir"] = resolved
-        _persist_sessions()
+        sessions.persist()
     _send_reply(data, f"📁 工作目录已切到 {_short_path(resolved)}")
 
 
@@ -1485,14 +679,8 @@ def _cmd_new(data: P2ImMessageReceiveV1, chat_id: str, arg: str = "") -> None:
     if arg and arg not in {"claude", "dsh", "all"}:
         _send_reply(data, "用法：`/new [claude|dsh|all]`")
         return
-    names = ("claude", "dsh") if arg == "all" else (arg or _chat_harness(chat_id),)
-    with _sessions_lock:
-        for name in names:
-            entry = _session_entry(chat_id, name, create=True)
-            entry.pop("session_id", None)
-            entry.pop("cwd", None)
-            entry["epoch"] = int(entry.get("epoch", 0)) + 1
-        _persist_sessions()
+    names = ("claude", "dsh") if arg == "all" else (arg or sessions.harness_name(chat_id),)
+    sessions.reset(chat_id, names)
     with _queue_lock:
         _chat_queues.pop(chat_id, None)
     _send_reply(data, f"🆕 已清空 {' / '.join(names)} 会话，下条消息从空上下文开始。")
@@ -1573,7 +761,7 @@ def _handle_command(data: P2ImMessageReceiveV1, text: str, chat_id: str) -> bool
         _send_reply(data, "🔄 bridge 正在重启，就绪后再发送指令。")
         return True
     if cmd in ("/help", "/h", "/?"):
-        _send_reply(data, f"当前 harness：{_chat_harness(chat_id)}\n\n" + HELP_TEXT)
+        _send_reply(data, f"当前 harness：{sessions.harness_name(chat_id)}\n\n" + HELP_TEXT)
     elif cmd in ("/new", "/clear"):
         _cmd_new(data, chat_id, arg)
     elif cmd in ("/claude", "/dsh"):
@@ -1697,7 +885,7 @@ def _execute_and_reply(
         if _restart_pending.is_set():
             _send_reply(data, "🔄 bridge 正在重启，就绪后再发送指令。")
             return
-        selected = _chat_harness(chat_id)
+        selected = sessions.harness_name(chat_id)
         if selected == "dsh" and not harness.REGISTRY["dsh"].available():
             _send_reply(data, "❌ 本机没有找到 dsh，安装后重启服务；可用 /claude 切回。")
             return
@@ -1752,7 +940,7 @@ def _execute_and_reply(
             # 卡片放不下的部分接着发（旧行为是整段丢弃，长报告会缺内容）
             if not _send_reply(data, f"（接上条卡片）\n{answer[CARD_BODY_MAX:]}"):
                 logging.warning("overflow reply send failed")
-        _update_chat_stats(chat_id, state, elapsed)
+        sessions.update_stats(chat_id, state, elapsed)
     except subprocess.TimeoutExpired as exc:
         logging.error("exec timeout >%ss", exc.timeout)
         _send_reply(data, f"⏰ {selected} 执行超时（>{exc.timeout}s），进程组已终止。")

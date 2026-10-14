@@ -91,7 +91,7 @@ S3 目录与本地 `.share/` 下的目录一一对应（远端目录名不变，
 先克隆公共核心：
 
 ```bash
-git clone <公共仓库地址> ~/code/.agents
+git clone https://github.com/ZenosZeng/backstage.git ~/code/.agents
 ```
 
 再从 S3 初始化：
@@ -139,6 +139,10 @@ git clone <公共仓库地址> ~/code/.agents
 不配置 `projects` 时，workspace 级 memory 仍可正常使用。
 
 ### 创建首个共享工作区
+
+第一次使用可从 [公开最小示例](../examples/README.md) 开始：先运行本地记忆流程，
+再接入自己的存储。`examples/workspace/` 提供通用 Skill、Prompt 和知识入口，
+复制到新工作区的 `.share/` 后按需编辑；已有工作区应合并所需内容。
 
 1. 从根目录 `config.template.json` 创建本机 `config.json`，填写唯一 `machine_id`、
    `machine_role`、`workspace_root` 和 `sync.remote`，将 `shared_writer` 设为 `true`。

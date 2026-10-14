@@ -107,7 +107,7 @@ def factory(config: dict, config_path: Path, directory: Path) -> Application:
             "workdir": str(workdir),
             "permission_profile": profile,
             "dsh_available": bridge.harness.REGISTRY["dsh"].available(),
-            "session_count": len(bridge._chat_sessions),
+            "session_count": len(bridge.sessions.chats),
         },
         shutdown=shutdown,
         ready=False,

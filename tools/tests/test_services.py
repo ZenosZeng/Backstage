@@ -241,10 +241,10 @@ def test_remote_shutdown_kills_only_owned_child(monkeypatch, tmp_path):
         stderr=subprocess.PIPE,
     )
     try:
-        bridge._active_process = child
+        bridge.agent_runner.active_process = child
         bridge.shutdown()
         assert child.wait(timeout=5) == -signal.SIGTERM
-        assert bridge._stopping.is_set()
+        assert bridge.agent_runner.stopping.is_set()
     finally:
         if child.poll() is None:
             child.kill()

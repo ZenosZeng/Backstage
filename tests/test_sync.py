@@ -814,7 +814,7 @@ class SyncTest(unittest.TestCase):
         self.config["workspace_root"] = str(workspace)
         # 2026-08-12：skills 分类布局（common/eval/memory/train），递归发现
         for category, names in (
-            ("common", ("kimi-invoke",)),
+            ("common", ("call-agent",)),
             ("eval", ("analyze-b1k-eval", "sync-b1k-eval-request")),
             ("memory", ("check-memory", "memory", "write-work-report")),
             ("train", ("upload-pi-checkpoint",)),
@@ -834,7 +834,7 @@ class SyncTest(unittest.TestCase):
             SYNC.configure_agent_links(self.root, self.config, dry_run=False)
 
         expected = {
-            "kimi-invoke": "common/kimi-invoke",
+            "call-agent": "common/call-agent",
             "analyze-b1k-eval": "eval/analyze-b1k-eval",
             "sync-b1k-eval-request": "eval/sync-b1k-eval-request",
             "check-memory": "memory/check-memory",

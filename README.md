@@ -13,8 +13,8 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 
 ## 当前版本
 
-**v0.4.0**：飞书遥控新增第二个 harness DSH（`/claude` · `/dsh` 粘性切换，各存一条原生会话），
-卡片改为两行，新增规范重启脚本。历史变化、升级注意事项与旧编号映射见 [版本记录](docs/changelog.md)。
+**v0.5.0**：新增公开最小工作区示例，飞书桥拆分会话、执行与展示模块；训练监控支持
+susser-tod 原生 consumer/producer；项目采用 MIT License。升级注意事项见 [版本记录](docs/changelog.md)。
 
 ## 主要功能
 
@@ -32,7 +32,7 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 
 | 适配器 | 用途 |
 |---|---|
-| Pi 训练监控 | 只读训练日志及集群状态，报告 step、loss、ETA 和故障 |
+| Pi / susser-tod 训练监控 | 只读训练日志及集群状态，关联 consumer/producer，报告 step、loss、ETA 和故障 |
 | B1K 评测监控 | 只读评测日志及结果，报告进度、结果和故障 |
 
 飞书遥控不依赖 Pi/B1K；两个监控适配器不控制实际训练或评测任务。
@@ -49,13 +49,18 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 S3 同步还需要 MinIO Client（`mc`）及本机配置的存储 alias。
 
 ```bash
-git clone <repository-url> ~/code/.agents
+git clone https://github.com/ZenosZeng/backstage.git ~/code/.agents
 cd ~/code/.agents
 pixi install --locked
 pixi run tools-status
 ```
 
 安装不会自动启动服务或初始化业务仓库。工具可独立使用，无需先配置 S3。
+
+### 从空工作区开始
+
+首次使用可以先按 [最小工作区示例](examples/README.md) 验证本地记忆读写，无需 S3 或飞书。
+示例提供通用 Skill、Agent 入口 Prompt 和知识首页；验证后使用现有同步命令创建共享工作区。
 
 ### 加入共享工作区
 
@@ -191,4 +196,4 @@ git diff --check
 
 ## 许可
 
-仓库尚未附带 `LICENSE`，开源许可证待确定；公开可见不等于已授予开源使用许可。
+本项目采用 [MIT License](LICENSE)。依赖项遵循各自的许可证。
