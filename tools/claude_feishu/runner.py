@@ -123,6 +123,8 @@ class AgentRunner:
                 workdir=workdir,
                 settings=settings,
             )
+            state = state_factory(harness_name)
+            state.workdir = workdir
             with self.process_lock:
                 if self.stopping.is_set():
                     return "Service is stopping", state_factory(harness_name)
@@ -138,8 +140,6 @@ class AgentRunner:
                     start_new_session=True,
                 )
                 self.active_process = proc
-            state = state_factory(harness_name)
-            state.workdir = workdir
             try:
                 started = time.monotonic()
                 deadline = started + timeout

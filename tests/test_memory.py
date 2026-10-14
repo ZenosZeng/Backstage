@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import io
 import datetime as dt
 import subprocess
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory.py"
@@ -272,6 +276,20 @@ class MemoryCliTest(unittest.TestCase):
         self.assertEqual(set(json.loads(result.stdout)["counts"]), {"legacy_non_utc", "legacy_date_mismatch"})
         self.assertEqual(self.run_cli("get", "absent", check=False).returncode, 1)
 
+    def test_get_reads_events_and_sources_in_one_snapshot(self):
+        self.import_events([self.sample_event(agent="codex"), self.sample_event("other", agent="claude")])
+        spec = importlib.util.spec_from_file_location("memory_source_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with mock.patch.object(module, "read_daily", wraps=module.read_daily) as read:
+            with redirect_stdout(output):
+                module.command_get(self.root, module.parser().parse_args(["get", "original"]))
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["event"]["event_id"], "original")
+        self.assertIn("/codex/", result["source"])
+        self.assertEqual(read.call_count, 2)  # one read per daily file
+
     def test_audit_is_read_only_and_reports_unverified_stale_references(self):
         old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=90)).isoformat()
         self.import_events([self.sample_event(event_type="hypothesis", status="needs_verification", created_at=old, content={"what": "not tested"}, supersedes=["unknown"])])
@@ -298,6 +316,30 @@ class MemoryCliTest(unittest.TestCase):
         document["machine_id"] = "wrong-machine"
         path.write_text(json.dumps(document))
         self.assertEqual(self.run_cli("validate", check=False).returncode, 1)
+
+    def test_invalid_project_names_and_task_ids_are_rejected_atomically(self):
+        for changes in (
+            {"projects": [{}]}, {"projects": [{"name": " "}]},
+            {"projects": [{"name": []}]}, {"projects": [""]},
+            {"task_id": []}, {"task_id": 42}, {"task_id": " "},
+        ):
+            with self.subTest(changes=changes):
+                result = self.import_events([
+                    self.sample_event("valid"), self.sample_event("invalid", **changes),
+                ], check=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse((self.root / ".share" / "memory").exists())
+
+    def test_validate_and_brief_report_bad_legacy_project_without_traceback(self):
+        self.import_events([self.sample_event(task_id="example")])
+        path = next((self.root / ".share").rglob("*.json"))
+        document = json.loads(path.read_text())
+        document["events"][0]["projects"] = [{}]
+        path.write_text(json.dumps(document))
+        self.assertEqual(self.run_cli("validate", check=False).returncode, 1)
+        result = self.run_cli("brief", "--task", "example", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_supersedes_cycle_is_visible_and_current_refuses_to_guess(self):
         self.import_events([self.sample_event("a", supersedes=["b"]), self.sample_event("b", supersedes=["a"])])

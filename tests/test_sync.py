@@ -361,6 +361,87 @@ class SyncTest(unittest.TestCase):
         )
         self.assertTrue(SYNC.shared_base(self.root).is_dir())
 
+    def test_init_push_rejects_remote_shared_without_memory(self) -> None:
+        with (
+            mock.patch.object(SYNC, "validate_control_plane"),
+            mock.patch.object(SYNC, "load_config", return_value=self.config),
+            mock.patch.object(SYNC, "validate_local_memory"),
+            mock.patch.object(SYNC, "remote_has_objects", return_value=True) as exists,
+            mock.patch.object(SYNC, "push_all_memory") as push_memory,
+            mock.patch.object(SYNC, "upload_shared") as push_shared,
+        ):
+            with self.assertRaisesRegex(SYNC.SyncError, "不是空目录"):
+                SYNC.command_init(self.root, Namespace(
+                    push=True, force=False, dry_run=False, allow_non_writer=False,
+                ))
+        self.assertEqual(exists.call_args.args[0], self.config["sync"]["remote"])
+        push_memory.assert_not_called()
+        push_shared.assert_not_called()
+
+    def test_shared_pull_keeps_edits_made_during_download(self) -> None:
+        self.write_shared(self.root, "base")
+        SYNC.update_shared_base(self.root, self.root)
+        remote = Path(self.temporary.name) / "remote"
+        self.write_shared(remote, "remote")
+        local_file = self.root / ".share/knowledge/_workspace.md"
+        before_base = SYNC.shared_manifest(SYNC.shared_base(self.root))
+
+        def download(*args, **kwargs):
+            self.fake_download(remote)(*args, **kwargs)
+            local_file.write_text("concurrent local edit")
+
+        with mock.patch.object(SYNC, "download_shared", side_effect=download):
+            with self.assertRaisesRegex(SYNC.SyncError, "同步期间本地"):
+                SYNC.reconcile_shared(
+                    self.root, self.config, mode="both", dry_run=False, allow_non_writer=False,
+                )
+        self.assertEqual(local_file.read_text(), "concurrent local edit")
+        self.assertEqual(SYNC.shared_manifest(SYNC.shared_base(self.root)), before_base)
+        self.assertEqual(
+            (SYNC.shared_conflict(self.root) / "remote/.share/knowledge/_workspace.md").read_text(),
+            "workspace remote\n",
+        )
+
+    def test_shared_recheck_ignores_snapshot_excluded_python_caches(self) -> None:
+        self.write_shared(self.root, "base")
+        SYNC.update_shared_base(self.root, self.root)
+        remote = Path(self.temporary.name) / "remote"
+        SYNC.copy_shared_snapshot(self.root, remote)
+        cache = self.root / ".share/agent/skills/memory/__pycache__/generated.pyc"
+        cache.parent.mkdir()
+        cache.write_bytes(b"compiled cache")
+        (cache.parent.parent / "generated.pyo").write_bytes(b"another cache")
+        with mock.patch.object(SYNC, "download_shared", side_effect=self.fake_download(remote)):
+            SYNC.reconcile_shared(
+                self.root, self.config, mode="both", dry_run=False, allow_non_writer=False,
+            )
+        self.assertEqual(SYNC.shared_manifest(self.root), SYNC.shared_manifest(remote))
+        self.assertFalse(SYNC.shared_conflict(self.root).exists())
+
+    def test_file_publish_keeps_edits_made_during_upload(self) -> None:
+        self.write_shared(self.root, "base")
+        SYNC.update_shared_base(self.root, self.root)
+        remote = Path(self.temporary.name) / "remote"
+        SYNC.copy_shared_snapshot(self.root, remote)
+        target = self.root / ".share/knowledge/_workspace.md"
+        target.write_text("published version")
+        uploaded = []
+
+        def upload(source, *_args, **_kwargs):
+            uploaded.append(Path(source).read_text())
+            target.write_text("new edit during upload")
+
+        with (
+            mock.patch.object(SYNC, "download_shared", side_effect=self.fake_download(remote)),
+            mock.patch.object(SYNC, "copy_object", side_effect=upload),
+        ):
+            with self.assertRaisesRegex(SYNC.SyncError, "同步期间本地"):
+                SYNC.publish_shared_file(
+                    self.root, self.config, target, dry_run=False, allow_non_writer=False,
+                )
+        self.assertEqual(uploaded, ["published version"])
+        self.assertEqual(target.read_text(), "new edit during upload")
+
     def test_first_shared_sync_detects_unbased_divergence(self) -> None:
         self.write_shared(self.root, "local")
         remote = Path(self.temporary.name) / "remote-shared"

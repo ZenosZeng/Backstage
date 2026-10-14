@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from unittest.mock import patch
+
+import pytest
 
 from tools.claude_feishu import presentation
 from tools.claude_feishu.sessions import SessionStore
@@ -49,6 +52,25 @@ def test_display_settings_belong_to_each_run(monkeypatch):
     assert first_card["header"]["subtitle"]["content"] == "alpha · /first · ctx 10%"
     assert second_card["header"]["subtitle"]["content"] == "beta · /second · ctx 5%"
     assert second_card["elements"][0]["text"]["content"] == "second"
+
+
+def test_state_factory_failure_does_not_start_a_child(tmp_path):
+    from tools.claude_feishu.runner import AgentRunner
+
+    runner = AgentRunner(SessionStore(tmp_path / "sessions.json"))
+
+    def broken_state(_):
+        raise RuntimeError("state initialization failed")
+
+    with patch("tools.claude_feishu.runner.subprocess.Popen") as spawn:
+        with pytest.raises(RuntimeError, match="state initialization failed"):
+            runner.run(
+                "task", "chat", claude_cli=sys.executable, settings="",
+                default_workdir=str(tmp_path), session_context_enabled=True,
+                timeout=1, progress_interval=0, state_factory=broken_state,
+            )
+    spawn.assert_not_called()
+    assert runner.active_process is None
 
 
 def test_runner_and_rendering_work_without_feishu_sdk(tmp_path):

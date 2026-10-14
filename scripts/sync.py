@@ -372,6 +372,9 @@ def shared_manifest(snapshot: Path) -> dict[str, str]:
             for file_path in sorted(path.rglob("*")):
                 if not file_path.is_file():
                     continue
+                # Hash the same contents copy_shared_snapshot actually copies.
+                if COPY_IGNORE(path, file_path.relative_to(path).parts):
+                    continue
                 relative = file_path.relative_to(snapshot).as_posix()
                 manifest[relative] = hashlib.sha256(file_path.read_bytes()).hexdigest()
     return manifest
@@ -477,6 +480,23 @@ def save_shared_conflict(
     conflict.parent.mkdir(parents=True, exist_ok=True)
     os.replace(temporary, conflict)
     return conflict
+
+
+def ensure_shared_unchanged(root: Path, expected: dict[str, str], remote_snapshot: Path) -> None:
+    """Editors do not hold shared_lock; recheck before replacing their files."""
+    current = shared_manifest(root)
+    if current != expected:
+        conflict = save_shared_conflict(
+            root,
+            remote_snapshot=remote_snapshot,
+            base_manifest=shared_manifest(shared_base(root)),
+            local_manifest=current,
+            remote_manifest=shared_manifest(remote_snapshot),
+        )
+        raise SyncError(
+            "同步期间本地 shared 已被修改，已保留本地与远端快照；"
+            f"请核对 {conflict / 'remote'} 后重新同步"
+        )
 
 
 def download_shared(
@@ -637,14 +657,16 @@ def publish_shared_file(
         copy_shared_snapshot(remote_snapshot, merged_snapshot)
         merged_file = merged_snapshot / relative
         merged_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(local_file, merged_file)
+        shutil.copy2(local_snapshot / relative, merged_file)
+        ensure_shared_unchanged(root, local, remote_snapshot)
         if local.get(relative) != remote.get(relative):
             copy_object(
-                local_file,
+                merged_file,
                 remote_path(sync["remote"], relative.removeprefix(".share/")),
                 clear_proxy=clear_proxy,
                 dry_run=False,
             )
+        ensure_shared_unchanged(root, local, remote_snapshot)
         install_shared_snapshot(root, merged_snapshot)
         update_shared_base(root, merged_snapshot)
         clear_shared_conflict(root)
@@ -692,6 +714,7 @@ def reconcile_shared(
         base_path = shared_base(root)
         has_base = base_path.is_dir()
         base = shared_manifest(base_path) if has_base else {}
+        ensure_shared_unchanged(root, local, remote_snapshot)
 
         if local == remote:
             update_shared_base(root, local_snapshot)
@@ -973,13 +996,12 @@ def command_init(root: Path, args: argparse.Namespace) -> int:
         require_shared_writer(config, allow_non_writer=args.allow_non_writer)
         validate_local_memory(root)
         sync = config["sync"]
-        memory_remote = remote_path(sync["remote"], "memory")
         if remote_has_objects(
-            memory_remote,
+            sync["remote"],
             clear_proxy=bool(sync.get("clear_proxy")),
             dry_run=args.dry_run,
         ) and not args.force:
-            raise SyncError("远端 memory 不是空目录；确认后可使用 --force")
+            raise SyncError("远端 memory/shared 前缀不是空目录；确认后可使用 --force")
         push_all_memory(root, config, dry_run=args.dry_run)
         upload_shared(root, config, dry_run=args.dry_run)
         if not args.dry_run:

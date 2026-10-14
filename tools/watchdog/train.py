@@ -71,6 +71,7 @@ def _native_bindings() -> dict[str, dict]:
                 continue
             bindings[job] = {
                 "exp_name": root.name,
+                "run_id": str(root.resolve()),
                 "role": role,
                 "log_dir": root / "logs" / launch,
                 "producers_per_node": run.get("producers_per_node", 1),
@@ -542,6 +543,7 @@ class TrainMonitor:
             phase = job["status"]
             prev = self._known_jobs.get(job_name)
             exp = job.get("exp_name", "")
+            progress_id = job.get("run_id") or exp
             extra = self._job_details(job_name, job, jobs) if job.get("role") else []
             if job.get("role"):
                 self._failed_attempts.setdefault(job_name, job["failed_attempts"])
@@ -549,21 +551,21 @@ class TrainMonitor:
                 self._known_jobs[job_name] = "running"
                 if not self._initialized:
                     continue  # baseline: existed before we started watching
-                events.append(("start", job_name, exp, self._progress_of(exp), extra))
+                events.append(("start", job_name, exp, self._progress_of(progress_id), extra))
             elif prev in ("running", "active") and phase == "succeeded":
                 self._known_jobs[job_name] = "finished"
                 events.append(
-                    ("finished", job_name, exp, self._progress_of(exp), extra)
+                    ("finished", job_name, exp, self._progress_of(progress_id), extra)
                 )
             elif prev in ("running", "active") and phase == "failed":
                 self._known_jobs[job_name] = "failed"
-                events.append(("failed", job_name, exp, self._progress_of(exp), extra))
+                events.append(("failed", job_name, exp, self._progress_of(progress_id), extra))
             elif prev is None and phase == "failed":
                 # appeared already failed (e.g. quick crash)
                 self._known_jobs[job_name] = "failed"
                 if not self._initialized:
                     continue
-                events.append(("failed", job_name, exp, self._progress_of(exp), extra))
+                events.append(("failed", job_name, exp, self._progress_of(progress_id), extra))
             if job.get("role"):
                 failures = job["failed_attempts"]
                 old_failures = self._failed_attempts.get(job_name, failures)
@@ -574,7 +576,7 @@ class TrainMonitor:
                             "warning",
                             job_name,
                             exp,
-                            self._progress_of(exp),
+                            self._progress_of(progress_id),
                             extra
                             + [
                                 (
@@ -591,7 +593,7 @@ class TrainMonitor:
                 self._known_jobs.get(job_name) == "running"
                 and job_name not in self._missing_jobs
                 and any(
-                    job.get("exp_name") == binding["exp_name"]
+                    job.get("run_id") == binding["run_id"]
                     and job.get("status") in {"active", "pending"}
                     for job in jobs.values()
                 )
@@ -602,7 +604,7 @@ class TrainMonitor:
                         "failed",
                         job_name,
                         binding["exp_name"],
-                        self._progress_of(binding["exp_name"]),
+                        self._progress_of(binding["run_id"]),
                         [
                             (
                                 "故障",
@@ -619,8 +621,15 @@ class TrainMonitor:
         for kind, _, exp, progress, extra in self._check_stall_events(jobs):
             events.append((kind, "", exp, progress, extra))
 
-        for kind, job_id, exp, progress, extra in events:
-            self._emit(kind, job_id, exp, progress, extra)
+        pending = self._err_state.setdefault("pending_events", [])
+        pending.extend(events)
+        # Log cursors and phase transitions can advance only if the generated
+        # notifications are retained alongside them until delivery succeeds.
+        _save_state(self._err_state)
+        while pending:
+            if not self._emit(*pending[0]):
+                break
+            pending.pop(0)
         _save_state(self._err_state)
         return []
 
@@ -712,7 +721,7 @@ class TrainMonitor:
                             "warning",
                             "",
                             exp,
-                            self._progress_of(exp),
+                            self._progress_of(binding["run_id"]),
                             [
                                 ("角色", binding["role"]),
                                 ("日志", err_path.name),
@@ -744,7 +753,7 @@ class TrainMonitor:
         events = []
         now = time.time()
         active_experiments = {
-            str(job.get("exp_name", ""))
+            str(job.get("run_id") or job["exp_name"]): str(job["exp_name"])
             for job in jobs.values()
             if job.get("status") == "active"
             and job.get("exp_name")
@@ -754,10 +763,10 @@ class TrainMonitor:
         for name in list(self._stalled_reported):
             if name not in active_experiments:
                 self._stalled_reported.pop(name, None)
-        for name in sorted(active_experiments):
+        for identity, name in sorted(active_experiments.items()):
             if name.startswith("offline-eval-"):
                 continue
-            progress = self._progress_of(name)
+            progress = self._progress_of(identity)
             if progress and progress.get("type") == "susser_train":
                 if not progress.get("step"):
                     continue
@@ -771,7 +780,7 @@ class TrainMonitor:
                 if err_path is None or not progress:
                     continue
                 age_min = (now - err_path.stat().st_mtime) / 60
-            previous = self._stalled_reported.get(name)
+            previous = self._stalled_reported.get(identity)
             if age_min >= STALL_FAIL_MIN:
                 if previous != "failed":
                     events.append(
@@ -783,7 +792,7 @@ class TrainMonitor:
                             [("故障", f"进度 {age_min:.0f} 分钟未更新")],
                         )
                     )
-                self._stalled_reported[name] = "failed"
+                self._stalled_reported[identity] = "failed"
             elif age_min >= STALL_WARNING_MIN:
                 if previous not in {"warning", "failed"}:
                     events.append(
@@ -796,9 +805,9 @@ class TrainMonitor:
                         )
                     )
                 if previous != "failed":
-                    self._stalled_reported[name] = "warning"
+                    self._stalled_reported[identity] = "warning"
             else:
-                self._stalled_reported.pop(name, None)
+                self._stalled_reported.pop(identity, None)
         active_offline = {
             exp for exp in active_experiments if exp.startswith("offline-eval-")
         }
@@ -921,7 +930,11 @@ class TrainMonitor:
     def _job_details(job_name: str, job: dict, jobs: dict) -> list:
         extra = [("角色", job["role"])]
         for name, related in jobs.items():
-            if related.get("exp_name") != job["exp_name"] or not related.get("role"):
+            if (
+                (related.get("run_id") or related.get("exp_name"))
+                != (job.get("run_id") or job["exp_name"])
+                or not related.get("role")
+            ):
                 continue
             role = related["role"]
             quantity = (
@@ -938,7 +951,7 @@ class TrainMonitor:
                 )
             )
         for name, binding in _native_bindings().items():
-            if binding["exp_name"] == job["exp_name"] and name not in jobs:
+            if binding["run_id"] == job.get("run_id") and name not in jobs:
                 extra.append((binding["role"], f"当前查不到 Job · {name}"))
         if job.get("reason"):
             extra.append(("Kubernetes 原因", job["reason"][:400]))
@@ -955,9 +968,15 @@ class TrainMonitor:
     def _progress_of(self, exp_name: str) -> dict | None:
         if not exp_name:
             return None
-        for binding in _native_bindings().values():
-            if binding["exp_name"] == exp_name and binding["role"] == "consumer":
-                return self._native_progress(binding["log_dir"] / "consumer-node_0.log")
+        native = [
+            binding for binding in _native_bindings().values()
+            if binding["role"] == "consumer"
+            and exp_name in {binding["run_id"], binding["exp_name"]}
+        ]
+        if len(native) == 1:
+            return self._native_progress(native[0]["log_dir"] / "consumer-node_0.log")
+        if native:
+            return None  # a basename cannot identify multiple native runs
         if exp_name.startswith("offline-eval-"):
             return _offline_progress(exp_name)
         for name, pattern in TRAIN_PATTERNS:
@@ -971,7 +990,7 @@ class TrainMonitor:
 
     def _emit(
         self, kind: str, job_id: str, exp: str, progress: dict | None, extra: list
-    ) -> None:
+    ) -> bool:
         status = {
             "start": "开始",
             "finished": "结束",
@@ -983,6 +1002,7 @@ class TrainMonitor:
         sent = self.sender(kind, body)
         outcome = "sent" if sent else "send failed"
         print(f"[watchdog] {kind} event {outcome}: {exp or job_id}", flush=True)
+        return bool(sent)
 
     # -- routine heartbeat: running kjobs as title + bullet list (mobile-
     #    friendly; markdown tables are cramped on phones). Finished/failed
@@ -1000,14 +1020,15 @@ class TrainMonitor:
         for name, job in active_jobs:
             exp = job.get("exp_name", "")
             if job.get("role") == "producer" and any(
-                related.get("exp_name") == exp
+                (related.get("run_id") or related.get("exp_name"))
+                == (job.get("run_id") or exp)
                 and related.get("role") == "consumer"
                 and related.get("status") in {"active", "pending"}
                 for related in jobs.values()
             ):
                 continue
             kind = _job_kind(exp)
-            progress = self._progress_of(exp) if exp else None
+            progress = self._progress_of(job.get("run_id") or exp) if exp else None
             lines = [
                 f"**job{len(blocks) + 1}: {exp or name}** - {'等待调度' if job['status'] == 'pending' else '运行中'}（{kind}）",
                 f"- kjob: {name}",

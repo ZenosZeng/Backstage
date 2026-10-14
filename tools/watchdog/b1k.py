@@ -62,25 +62,37 @@ class Alert:
     lifecycle: bool = False
 
 
-def eval_process_running() -> bool:
+def eval_process_running(config_path: Path | None = None) -> bool:
     proc = Path("/proc")
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            command = (
-                (entry / "cmdline")
-                .read_bytes()
-                .replace(b"\0", b" ")
-                .decode(errors="ignore")
-            )
+            argv = (entry / "cmdline").read_bytes().decode(errors="ignore").split("\0")
         except OSError:
             continue
         if (
-            any(marker in command for marker in DEFAULT_PROCESS_MARKERS)
-            and "--dry-run" not in command
+            any(arg.endswith(marker) for arg in argv for marker in DEFAULT_PROCESS_MARKERS)
+            and "--dry-run" not in argv
         ):
-            return True
+            if config_path is None:
+                return True
+            selected = None
+            for index, arg in enumerate(argv):
+                if arg == "--config" and index + 1 < len(argv):
+                    selected = argv[index + 1]
+                elif arg.startswith("--config="):
+                    selected = arg.partition("=")[2]
+            if not selected:
+                continue
+            candidate = Path(selected).expanduser()
+            try:
+                if not candidate.is_absolute():
+                    candidate = (entry / "cwd").resolve(strict=True) / candidate
+                if candidate.resolve() == config_path.resolve():
+                    return True
+            except OSError:
+                continue
     return False
 
 
@@ -95,7 +107,7 @@ class B1kEvalMonitor:
     def __init__(
         self,
         log_path: Path | None = None,
-        process_checker: Callable[[], bool] = eval_process_running,
+        process_checker: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         *,
         repo_root: Path | None = None,
@@ -136,7 +148,9 @@ class B1kEvalMonitor:
         )
         if not 0 < self.warning_seconds <= self.critical_seconds:
             raise ValueError("stall thresholds must satisfy 0 < warning <= critical")
-        self.process_checker = process_checker
+        self.process_checker = process_checker or (
+            lambda: eval_process_running(self._eval_toml_path())
+        )
         self.clock = clock
         self.last_completed: int | None = None
         self.last_progress_at = clock()
@@ -175,6 +189,10 @@ class B1kEvalMonitor:
         if selected != self.log_path:
             self.log_path = selected
             self.log_offset = 0
+            self.last_completed = None
+            self.last_failures = 0
+            self.last_process_running = None
+            self.last_progress_at = self.clock()
         return self.log_path
 
     def _log_heartbeat(self) -> dict[str, int | str]:
@@ -214,14 +232,7 @@ class B1kEvalMonitor:
         (aggregating summary.json from all complete jobs on disk), so the value
         stays correct across log rotation/resume.
         """
-        path = self._refresh_log()
-        if not path.is_file():
-            return {}
-        try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
-            return {}
-        for line in reversed(lines):
+        for line in self._reverse_log_lines():
             if "Current results:" not in line:
                 continue
             result: dict[str, int | float] = {}
@@ -373,17 +384,34 @@ class B1kEvalMonitor:
             )
         return lines
 
+    def _reverse_log_lines(self):
+        """Read backwards in the same 256 KiB blocks used for heartbeats.
+
+        Continue past the tail when needed so old result/final lines remain
+        available even if later log noise fills more than one block.
+        """
+        try:
+            with self._refresh_log().open("rb") as stream:
+                end = stream.seek(0, 2)
+                remainder = b""
+                while end:
+                    start = max(0, end - 256 * 1024)
+                    stream.seek(start)
+                    lines = (stream.read(end - start) + remainder).split(b"\n")
+                    remainder = lines.pop(0) if start else b""
+                    for line in reversed(lines):
+                        yield line.decode(errors="ignore")
+                    end = start
+        except OSError:
+            return
+
     def _log_final_status(self) -> str | None:
         """Return the last 'Evaluation finished: status=...' value, if any."""
-        path = self._refresh_log()
-        if not path.is_file():
-            return None
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return None
-        matches = re.findall(r"Evaluation finished: status=(\S+)", text)
-        return matches[-1] if matches else None
+        for line in self._reverse_log_lines():
+            matches = re.findall(r"Evaluation finished: status=(\S+)", line)
+            if matches:
+                return matches[-1]
+        return None
 
     def _new_log_alerts(self) -> list[Alert]:
         path = self._refresh_log()
@@ -414,6 +442,7 @@ class B1kEvalMonitor:
                 "failed",
                 "评测日志异常",
                 f"{self.card_content('异常')}\n- 原因：{excerpt}",
+                lifecycle=True,
             )
         ]
 
@@ -461,6 +490,7 @@ class B1kEvalMonitor:
                     "warning" if running else "failed",
                     "评测失败数增加",
                     f"{self.card_content('存在失败')}\n- 原因：failed_rollouts {self.last_failures} → {failures}",
+                    lifecycle=True,
                 )
             )
 

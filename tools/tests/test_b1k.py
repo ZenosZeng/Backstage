@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.watchdog import b1k as monitor_b1k
 from tools.watchdog import notifier
@@ -72,6 +73,66 @@ class B1kMonitorTests(unittest.TestCase):
             repo_root=self.root, process_checker=lambda: True
         )
         self.assertIn(self.root / "scripts/eval/fleet/eval.log", monitor.default_logs)
+
+    def test_process_check_binds_selected_config_and_resolves_process_cwd(self):
+        proc = self.root / "proc"
+        selected = self.root / "selected config.toml"
+        self.write_log(f"Config: {selected}", self.HEARTBEAT)
+        for pid, config in (("100", selected.name), ("200", "other.toml")):
+            entry = proc / pid
+            entry.mkdir(parents=True)
+            (entry / "cwd").symlink_to(self.root, target_is_directory=True)
+            (entry / "cmdline").write_bytes(
+                b"python\0scripts/eval/fleet/eval.py\0--config\0" + config.encode() + b"\0"
+            )
+        real_path = Path
+        with mock.patch.object(monitor_b1k, "Path", side_effect=lambda value: proc if value == "/proc" else real_path(value)):
+            monitor = monitor_b1k.B1kEvalMonitor(self.log_path, repo_root=self.root)
+            assert monitor.active()
+            monitor.check_alerts()
+            (proc / "100/cmdline").unlink()
+            self.assertFalse(monitor.active())
+            self.assertIn("eval-process-died", [a.key for a in monitor.check_alerts()])
+            (proc / "100/cmdline").write_bytes(
+                b"python\0scripts/eval/fleet/eval.py\0--config=" + str(selected).encode() + b"\0"
+            )
+            self.assertTrue(monitor.active())
+            with (proc / "100/cmdline").open("ab") as stream:
+                stream.write(b"--dry-run\0")
+            self.assertFalse(monitor.active())
+
+    def test_new_auto_selected_log_gets_fresh_stall_baseline(self):
+        old = self.root / "scripts/eval/0srv16sim/eval.log"
+        old.parent.mkdir(parents=True)
+        old.write_text(self.HEARTBEAT + "\n")
+        os.utime(old, ns=(1, 1))
+        monitor = monitor_b1k.B1kEvalMonitor(
+            repo_root=self.root, process_checker=lambda: True, clock=self.clock,
+            warning_seconds=10, critical_seconds=20,
+        )
+        monitor.check_alerts()
+        monitor.last_failures = 5
+        new = self.root / "scripts/eval/fleet/eval.log"
+        new.parent.mkdir(parents=True)
+        new.write_text(self.HEARTBEAT + "\n")
+        self.clock.value = 25
+        self.assertEqual(monitor.check_alerts(), [])
+        self.assertEqual(monitor.log_path, new)
+        self.assertEqual(monitor.last_progress_at, 25)
+        self.assertEqual(monitor.last_failures, 0)
+        self.clock.value = 36
+        self.assertIn("eval-stalled-warning", [a.key for a in monitor.check_alerts()])
+
+    def test_large_log_results_and_final_status_use_bounded_reads(self):
+        self.write_log("Evaluation finished: status=partial", self.RESULTS,
+                       "ordinary log line\n" * 50000,
+                       "Current results: rollouts=12 SR=4/12 Q=0.500")
+        monitor = self.monitor()
+        # These helpers must neither allocate the full log nor discard an old
+        # final status outside the first tail block.
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("whole-file read")):
+            self.assertEqual(monitor._log_results()["successes"], 4)
+            self.assertEqual(monitor._log_final_status(), "partial")
 
     def test_stall_warning_and_critical(self):
         monitor = self.monitor()

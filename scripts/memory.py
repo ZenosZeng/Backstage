@@ -223,6 +223,17 @@ def validate_event(event: dict[str, Any]) -> list[str]:
             errors.append("任务状态事件必须记录原因 what 和来源 where")
     if not isinstance(event.get("projects"), list):
         errors.append("projects 必须是 array")
+    elif any(
+        not isinstance(project, dict)
+        or not isinstance(project.get("name"), str)
+        or not project["name"].strip()
+        for project in event["projects"]
+    ):
+        errors.append("projects 每项必须是含非空字符串 name 的 object")
+    if event.get("task_id") is not None and (
+        not isinstance(event["task_id"], str) or not event["task_id"].strip()
+    ):
+        errors.append("task_id 必须是非空字符串")
     supersedes = event.get("supersedes", [])
     if not isinstance(supersedes, list) or any(
         not isinstance(item, str) or not item for item in supersedes
@@ -366,13 +377,18 @@ def memory_files(root: Path) -> list[Path]:
     return sorted((root / ".share" / "memory").glob("*/*/*.json"))
 
 
-def load_events(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def load_events(
+    root: Path, *, sources: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     events: list[dict[str, Any]] = []
     errors: list[str] = []
     for path in memory_files(root):
         try:
             document = read_daily(path)
             events.extend(normalize_event(raw) for raw in document["events"])
+            if sources is not None:
+                sources.update({raw["event_id"]: path.relative_to(root).as_posix()
+                                for raw in document["events"]})
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             errors.append(f"{path}：{exc}")
     counts = Counter(event["event_id"] for event in events)
@@ -736,35 +752,25 @@ def command_validate(root: Path, _args: argparse.Namespace) -> int:
 
 
 def command_get(root: Path, args: argparse.Namespace) -> int:
-    events, errors = load_events(root)
+    sources: dict[str, str] = {}
+    events, errors = load_events(root, sources=sources)
     if errors:
         raise ValueError("记忆库校验失败，请先运行 validate")
     for event in events:
         if event["event_id"] == args.event_id:
-            result = {"source": event_sources(root)[event["event_id"]], "event": event}
+            result = {"source": sources[event["event_id"]], "event": event}
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
     print("没有找到该 event_id。", file=sys.stderr)
     return 1
 
 
-def event_sources(root: Path) -> dict[str, str]:
-    sources = {}
-    for path in memory_files(root):
-        try:
-            for event in read_daily(path)["events"]:
-                sources[event["event_id"]] = path.relative_to(root).as_posix()
-        except (ValueError, OSError):
-            continue
-    return sources
-
-
 def command_audit(root: Path, args: argparse.Namespace) -> int:
-    events, errors = load_events(root)
+    sources: dict[str, str] = {}
+    events, errors = load_events(root, sources=sources)
     issues = [{"kind": "invalid", "detail": error} for error in errors]
     known = {event["event_id"] for event in events}
     superseded = {key for event in events for key in event.get("supersedes", [])}
-    sources = event_sources(root)
     cyclic = supersedes_cycles(events)
     replacements: dict[str, list[str]] = {}
     for event in events:

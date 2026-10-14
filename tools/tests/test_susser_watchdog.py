@@ -159,6 +159,61 @@ def test_native_metrics_rank_zero_budget_and_completed_saves(native_run):
     assert any("未自动核验 S3" in line for line in lines)
 
 
+def test_same_named_native_runs_keep_metrics_grouping_and_stalls_separate(tmp_path, monkeypatch):
+    now = time.time()
+    runs = []
+    items = []
+    for index, step in enumerate((11, 99)):
+        root = tmp_path / str(index) / "same-name"
+        for role in ("consumer", "producer"):
+            job = f"{role}-{index}"
+            directory = root / "logs" / role
+            directory.mkdir(parents=True)
+            (root / f"{role}-job-name.txt").write_text(job)
+            (root / f"{role}-launch-id.txt").write_text(role)
+            (directory / f"{role}-node_0.log").write_text(
+                _header() + _metric(step, now - (1200 if index == 0 else 0))
+                if role == "consumer" else ""
+            )
+            items.append(_job(job, 1))
+        runs.append({"artifact_dir": root})
+    monkeypatch.setattr(train, "NATIVE_RUNS", runs)
+    monkeypatch.setattr(train, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(train, "KJOB_LOG", tmp_path / "legacy")
+    monkeypatch.setattr(train, "TRAIN_PATTERNS", [])
+    monkeypatch.setattr(train, "_run", lambda _: json.dumps({"items": items}))
+    monitor = train.TrainMonitor()
+    jobs = train._kubectl_jobs()
+    assert monitor._progress_of(jobs["consumer-0"]["run_id"])["step"] == 11
+    assert monitor._progress_of(jobs["consumer-1"]["run_id"])["step"] == 99
+    assert monitor._progress_of("same-name") is None
+    details = str(monitor._job_details("consumer-1", jobs["consumer-1"], jobs))
+    assert "producer-1" in details and "producer-0" not in details
+    status = monitor.status()
+    assert "11/400" in status and "99/400" in status
+    assert status.count("**job") == 2
+    stalled = monitor._check_stall_events(jobs)
+    assert len(stalled) == 1 and stalled[0][3]["step"] == 11
+
+
+def test_failed_native_notification_is_retained_across_monitor_restart(native_run, monkeypatch):
+    items = [_job("gpu-job", 3), _job("cpu-job", 18)]
+    monkeypatch.setattr(train, "_run", lambda _: json.dumps({"items": items}))
+    attempts = []
+    first = train.TrainMonitor(sender=lambda kind, body: attempts.append(kind) or False)
+    first.check_alerts()
+    items[1] = _job("cpu-job", 18, conditions=[{"type": "Failed", "status": "True"}])
+    first.check_alerts()
+    assert attempts == ["failed"]
+    assert first._err_state["pending_events"]
+    delivered = []
+    resumed = train.TrainMonitor(sender=lambda kind, body: delivered.append(kind) or True)
+    resumed.check_alerts()
+    resumed.check_alerts()
+    assert delivered == ["failed"]
+    assert resumed._err_state["pending_events"] == []
+
+
 def test_native_incremental_cursor_survives_restart_and_launch_change(
     native_run, monkeypatch
 ):

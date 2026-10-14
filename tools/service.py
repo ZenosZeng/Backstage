@@ -131,10 +131,10 @@ def status(name: str, directory: Path, *, as_json: bool = False) -> int:
     return 0
 
 
-def mark_ready(directory: Path) -> None:
+def mark_ready(directory: Path, ready: bool = True) -> None:
     record = running_record(directory, "claude-feishu")
     if record and record["pid"] == os.getpid():
-        record["ready"] = True
+        record["ready"] = ready
         atomic_json(directory / "pid.json", record)
 
 
@@ -221,6 +221,7 @@ def main(
         if args.no_notify:
             config["notify"] = False
         # Environment-selected requests must not silently reuse a different monitor.
+        startup_environment = dict(os.environ)
         environment = {
             key: os.environ.get(key)
             for key in (
@@ -316,7 +317,10 @@ def main(
                 validation = [sys.executable, "-m", *command, "--once", "--config", str(config_path)]
                 checked = None
                 try:
-                    checked = subprocess.run(validation, cwd=ROOT, capture_output=True, timeout=20)
+                    checked = subprocess.run(
+                        validation, cwd=ROOT, env=startup_environment,
+                        capture_output=True, timeout=20,
+                    )
                     valid = checked.returncode == 0
                 except (OSError, subprocess.TimeoutExpired):
                     valid = False
@@ -348,14 +352,9 @@ def main(
             restart_command = [sys.executable, "-m", *command, "--foreground", "--config", str(config_path)]
             if args.no_notify:
                 restart_command.append("--no-notify")
-            # Factory-injected CLI/workdir values are derived from config, not
-            # caller overrides. Restore the original overrides before reloading.
-            for key, value in environment.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-            os.execv(sys.executable, restart_command)
+            # Reload credentials/config from the original caller environment.
+            # Deleted file assignments must not survive as inherited overrides.
+            os.execve(sys.executable, restart_command, startup_environment)
         return result
     except (OSError, ValueError) as error:
         print(f"{name}: {error}", file=sys.stderr)

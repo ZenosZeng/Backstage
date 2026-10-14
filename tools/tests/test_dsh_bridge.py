@@ -56,7 +56,7 @@ def test_native_restart_is_managed_and_preserves_sessions(bridge, monkeypatch, t
     from types import SimpleNamespace
 
     data = SimpleNamespace(event=SimpleNamespace(message=SimpleNamespace(message_id="restart-message")))
-    bridge._service_ready = lambda: None
+    bridge._service_ready = lambda _ready: None
     bridge._service_config_path = str(tmp_path / "custom.json")
     bridge.sessions.get_or_create("chat", "claude")
     before = json.dumps(bridge.sessions.chats, sort_keys=True)
@@ -84,7 +84,7 @@ def test_native_restart_is_managed_and_preserves_sessions(bridge, monkeypatch, t
 
 @pytest.mark.parametrize("condition", ["busy", "queued", "unmanaged", "reply_failed", "argument"])
 def test_native_restart_rejection_keeps_bridge_running(bridge, monkeypatch, condition):
-    bridge._service_ready = lambda: None
+    bridge._service_ready = lambda _ready: None
     bridge._service_config_path = "private-config.json"
     popen = mock.Mock()
     monkeypatch.setattr(bridge.subprocess, "Popen", popen)

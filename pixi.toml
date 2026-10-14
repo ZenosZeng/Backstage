@@ -1,6 +1,6 @@
 [workspace]
 name = "agent-workspace"
-version = "0.5.0"
+version = "0.5.1"
 description = "Memory, monitoring and remote Agent tools"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
@@ -25,7 +25,7 @@ ruff = ">=0.11,<1"
 
 [feature.dev.tasks]
 test = "python -m pytest tests tools/tests -q"
-lint = "ruff check tools --select E9,F63,F7,F82"
+lint = "ruff check scripts tools --select E9,F"
 
 [environments]
 default = { features = [], solve-group = "tools" }

@@ -144,7 +144,7 @@ _chat_queues: dict[str, deque] = {}  # chat_id -> 排队的 (event, 指令)
 _drain_running = False  # 单消费者：同一时刻最多一个 drain 线程（_queue_lock 保护）
 _token_lock = threading.Lock()
 _restart_pending = threading.Event()
-_service_ready: Callable[[], None] | None = None
+_service_ready: Callable[[bool], None] | None = None
 _service_config_path: str = ""
 _token: dict[str, object] = {"token": "", "expires": 0.0}
 
@@ -959,7 +959,12 @@ class ObservedClient(ws.Client):
         if self._conn is not None:
             logging.info("Feishu websocket connected")
             if _service_ready is not None:
-                _service_ready()
+                _service_ready(True)
+
+    async def _disconnect(self) -> None:
+        if _service_ready is not None:
+            _service_ready(False)
+        await super()._disconnect()
 
 
 def main() -> int:

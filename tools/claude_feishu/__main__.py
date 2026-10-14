@@ -92,7 +92,7 @@ def factory(config: dict, config_path: Path, directory: Path) -> Application:
         raise ValueError("progress_interval_seconds must be non-negative")
     from tools.claude_feishu import bridge
 
-    bridge._service_ready = lambda: mark_ready(directory)
+    bridge._service_ready = lambda ready: mark_ready(directory, ready)
     bridge._service_config_path = str(config_path)
 
     def shutdown():

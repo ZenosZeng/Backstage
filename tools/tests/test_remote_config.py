@@ -32,12 +32,48 @@ def test_connection_readiness_does_not_log_signed_url(monkeypatch, tmp_path, cap
     client = object.__new__(bridge.ObservedClient)
     client._conn = object()
     client._conn_url = "wss://example.invalid/SECRET"
+    readiness = []
+    bridge._service_ready = readiness.append
     with patch.object(bridge.ws.Client, "_connect", new_callable=AsyncMock) as connect:
         caplog.set_level(logging.INFO)
         asyncio.run(client._connect())
         connect.assert_awaited_once()
     assert "Feishu websocket connected" in caplog.text
     assert "SECRET" not in caplog.text
+    assert readiness == [True]
+
+
+def test_disconnect_clears_readiness_until_reconnected(monkeypatch, tmp_path, capsys):
+    import asyncio
+    import importlib.util
+    from unittest.mock import AsyncMock, Mock, patch
+    from tools import service
+
+    monkeypatch.setenv("CLAUDE_FEISHU_STATE", str(tmp_path / "seen.json"))
+    monkeypatch.setenv("CLAUDE_FEISHU_SESSIONS", str(tmp_path / "sessions.json"))
+    spec = importlib.util.spec_from_file_location("disconnected_bridge", ROOT / "tools/claude_feishu/bridge.py")
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    record = {"pid": os.getpid(), "ready": True}
+    service.atomic_json(tmp_path / "pid.json", record)
+    monkeypatch.setattr(service, "running_record", lambda *_: json.loads((tmp_path / "pid.json").read_text()))
+    bridge._service_ready = lambda ready: service.mark_ready(tmp_path, ready)
+    client = object.__new__(bridge.ObservedClient)
+    connection = Mock()
+    connection.close = AsyncMock()
+    client._conn = connection
+    client._conn_url = client._conn_id = client._service_id = ""
+    client._lock = asyncio.Lock()
+    asyncio.run(client._disconnect())
+    assert client._conn is None
+    connection.close.assert_awaited_once()
+    service.status("claude-feishu", tmp_path, as_json=True)
+    assert json.loads(capsys.readouterr().out)["ready"] is False
+    with patch.object(bridge.ws.Client, "_connect", new_callable=AsyncMock):
+        client._conn = connection
+        asyncio.run(client._connect())
+    service.status("claude-feishu", tmp_path, as_json=True)
+    assert json.loads(capsys.readouterr().out)["ready"] is True
 
 
 def test_workspace_profile_preserves_permissions_and_denials():

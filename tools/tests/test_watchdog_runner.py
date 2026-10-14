@@ -12,7 +12,10 @@ from __future__ import annotations
 import threading
 import unittest
 
+import pytest
+
 from tools.watchdog import runner
+from tools.watchdog.b1k import B1kEvalMonitor
 
 
 class _Alert:
@@ -68,6 +71,61 @@ def _run(alerts: list, polls: int = 4) -> list[str]:
     runner.run(_Monitor(alerts, stop, polls), notifier, stop, poll_seconds=0.01)
     # 首尾各有一条固定的 "Watchdog 已启动/已停止"，与本次断言无关
     return [t for t in notifier.sent if t not in ("Watchdog 已启动", "Watchdog 已停止")]
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_failed_edge_is_retried_even_without_another_transition(tmp_path, raise_error):
+    log = tmp_path / "eval.log"
+    log.write_text("Heartbeat: completed=1/10, failures=0\n")
+    poll = 0
+    attempts = []
+    delivered = []
+
+    class Stop:
+        def is_set(self):
+            return poll >= 4
+
+        def wait(self, _):
+            nonlocal poll
+            poll += 1
+
+    class Notifier:
+        def send_card(self, kind, title, body):
+            if kind == "failed":
+                attempts.append(title)
+                if len(attempts) == 1:
+                    if raise_error:
+                        raise OSError("offline")
+                    return False
+                delivered.append(title)
+            return True
+
+    monitor = B1kEvalMonitor(log, process_checker=lambda: poll == 0)
+    runner.run(monitor, Notifier(), Stop(), poll_seconds=0)
+    assert attempts == ["评测进程异常退出", "评测进程异常退出"]
+    assert delivered == ["评测进程异常退出"]
+
+
+def test_recovered_stall_does_not_deliver_a_stale_pending_alert():
+    stop = threading.Event()
+    attempts = []
+
+    class Monitor(_Monitor):
+        def check_alerts(self):
+            self.seen += 1
+            if self.seen == 3:
+                stop.set()
+            return [_Alert("stall", lifecycle=False)] if self.seen == 1 else []
+
+    class Notifier(_Notifier):
+        def send_card(self, kind, title, message):
+            if title == "stall":
+                attempts.append(title)
+                return False
+            return True
+
+    runner.run(Monitor([], stop), Notifier(), stop, poll_seconds=0)
+    assert attempts == ["stall"]
 
 
 class LifecycleAlertTests(unittest.TestCase):

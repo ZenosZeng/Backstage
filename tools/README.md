@@ -44,6 +44,8 @@ PID 身份通过启动时间、命令、工作目录核验；不会用宽泛 `pk
 B1K 默认查找 `scripts/eval/{fleet,0srv16sim,2srv14sim,8srv8sim}/eval.log` 中最新日志。
 自定义请求建议显式指定 `log` 和 `eval_config`；兼容 `B1K_EVAL_LOG` / `B1K_EVAL_CONFIG`，
 但 JSON 显式字段优先。汇总只读当前 TOML 选中的 summary，保留 EMA/raw、namespace、horizon/steps 区别。
+存活检查按日志头的 `Config:`（缺失时用 `eval_config`）匹配进程的 `--config`，
+其他评测进程不会掩盖当前 run 退出；切换日志时重新建立进度与停滞基线。
 
 Pi 默认查找 workspace 的 `Pi_b1k`（存在时）或 `Pi`，读取其 `kjob_logs/`。
 `kubectl_args` 可配置 context/namespace，例如 `["--context", "cluster", "-n", "training"]`。
@@ -66,12 +68,14 @@ susser-tod 原生 Pi05 训练通过本机配置 `native_runs` 接入，和旧 Pi
 `artifact_dir` 采用已有发射产物：`consumer/producer-job-name.txt`、
 `consumer/producer-launch-id.txt` 和 `logs/<launch-id>/<role>-node_<index>.log`。
 每轮按文件中的确切 Job/launch 识别；续训后更新这些发射产物即可，无需把实验名写进通用代码。
+完整 artifact 目录用于区分 run，同名目录仍分别统计；卡片继续使用目录名显示。
 consumer 节点数/每节点 GPU 数来自 Kubernetes；producer 每节点进程数来自本机配置，
 节点 Ready 不等于每个 Python 进程存活，是否持续训练以 rank 0 的 step 为依据。
 总步数与 epoch 从发射预检日志读取，步速用最近 50 个 rank 0 日志窗口的均值。
 只追加读取原生日志，游标保存在已有 `cursors.json`，重载后保留预算及 checkpoint 保存记录。
 
 原生训练停滞按最后一次 step 的日志时间判断，其他日志持续刷屏不能掩盖停滞。
+尚未产出第一个 step 时不触发进度停滞告警；此时用 Job 状态及异常日志判断启动故障。
 producer 重试增加发橙色提醒，Job 的 `Failed/FailureTarget` 才判终止；
 部分节点完成不等于整个 Job 完成。供数的坏图像重采样与弃用警告不报训练失败。
 卡片中的 full/raw/EMA checkpoint 只表示保存日志完成，不替代 S3 payload/metadata 验收。
@@ -85,6 +89,8 @@ Fleet 日志默认使用 900/3600 秒，告警每分钟检查。正式多机评�
 `log` 为 fleet 的 `eval.log`、`eval_config` 为本次 TOML，重启 watchdog 后检查 `--status`。
 七类卡片为任务开始、完成、故障、停滞、整点状态、监控启动、监控停止。
 同内容成功发送后 600 秒去重；HTTP 200 仍检查业务 `code == 0`。
+发送失败的任务事件在下一轮重试；训练待发事件保存在现有 `cursors.json`，
+B1K 待发事件保留在监控进程内。持续告警仍按配置间隔限流。
 
 ## 飞书凭据
 

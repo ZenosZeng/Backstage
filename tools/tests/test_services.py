@@ -265,13 +265,25 @@ def test_reexec_restores_caller_overrides_and_releases_run_lock(monkeypatch, tmp
     monkeypatch.setenv("AGENTS_LOCAL_ROOT", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CLI", raising=False)
     monkeypatch.delenv("CLAUDE_FEISHU_WORKDIR", raising=False)
+    monkeypatch.delenv("FEISHU_ALLOW_OPEN_IDS", raising=False)
+    monkeypatch.delenv("FEISHU_OPEN_MODE", raising=False)
+    monkeypatch.setenv("DSH_CLI", "caller-dsh")
     handlers = {}
     monkeypatch.setattr(service.signal, "signal", lambda signum, handler: handlers.update({signum: handler}))
-    monkeypatch.setattr(service.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    def validate(*args, **kwargs):
+        assert "FEISHU_ALLOW_OPEN_IDS" not in kwargs["env"]
+        assert "FEISHU_OPEN_MODE" not in kwargs["env"]
+        assert kwargs["env"]["DSH_CLI"] == "caller-dsh"
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(service.subprocess, "run", validate)
 
     def factory(*args):
         os.environ["CLAUDE_CLI"] = "injected-by-factory"
         os.environ["CLAUDE_FEISHU_WORKDIR"] = str(tmp_path)
+        os.environ["FEISHU_ALLOW_OPEN_IDS"] = "old-file-user"
+        os.environ["FEISHU_OPEN_MODE"] = "1"
+        os.environ["DSH_CLI"] = "injected-dsh"
 
         def run(stop):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
@@ -280,18 +292,55 @@ def test_reexec_restores_caller_overrides_and_releases_run_lock(monkeypatch, tmp
 
         return service.Application(run=run, snapshot=lambda: {})
 
-    def execute(binary, argv):
-        assert "CLAUDE_CLI" not in os.environ
-        assert "CLAUDE_FEISHU_WORKDIR" not in os.environ
+    def execute(binary, argv, env):
+        assert "CLAUDE_CLI" not in env
+        assert "CLAUDE_FEISHU_WORKDIR" not in env
+        assert "FEISHU_ALLOW_OPEN_IDS" not in env
+        assert "FEISHU_OPEN_MODE" not in env
+        assert env["DSH_CLI"] == "caller-dsh"
         assert argv[-2:] == ["--config", str(config)]
-        with service.lock(tmp_path / "claude-feishu/run.lock"):
+        with service.lock(tmp_path / "tools/claude-feishu/run.lock"):
             pass
         raise RuntimeError("re-exec boundary reached")
 
-    monkeypatch.setattr(service.os, "execv", execute)
+    monkeypatch.setattr(service.os, "execve", execute)
     with pytest.raises(RuntimeError, match="re-exec boundary reached"):
         service.main("claude-feishu", ["tools.claude_feishu"], factory,
                      ["--foreground", "--config", str(config)])
+
+
+def test_restart_preflight_rejects_deleted_credential_allowlist(monkeypatch, tmp_path):
+    credentials = tmp_path / "env"
+    base = "FEISHU_APP_ID=test\nFEISHU_APP_SECRET=test\n"
+    credentials.write_text(base + "FEISHU_ALLOW_OPEN_IDS=old-user\n")
+    credentials.chmod(0o600)
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "credentials_file": str(credentials), "workdir": str(tmp_path),
+        "claude_cli": sys.executable,
+    }))
+    for key in ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_ALLOW_OPEN_IDS", "FEISHU_OPEN_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AGENTS_LOCAL_ROOT", str(tmp_path))
+    handlers = {}
+    monkeypatch.setattr(service.signal, "signal", lambda signum, fn: handlers.update({signum: fn}))
+
+    def factory(*args):
+        load_env_file(credentials)
+
+        def run(stop):
+            credentials.write_text(base)
+            handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            assert not stop.is_set()  # failed validation keeps the old app alive
+            record = json.loads((tmp_path / "tools/claude-feishu/pid.json").read_text())
+            assert "validation failed" in record["restart_error"]
+            stop.set()
+            return 0
+
+        return service.Application(run=run, snapshot=lambda: {})
+
+    assert service.main("claude-feishu", ["tools.claude_feishu"], factory,
+                        ["--foreground", "--config", str(config)]) == 0
 
 
 def test_live_restart_keeps_pid_and_rejects_invalid_config(tmp_path):
