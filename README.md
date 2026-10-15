@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/readme-cover.png" alt="Backstage：共享记忆、任务监控、飞书遥控" width="100%">
+  <img src="docs/assets/readme-cover.png" alt="Backstage：多 Agent、多机器、多仓库，共享上下文" width="100%">
 </p>
 
 # Backstage
 
-**为多 Agent、多机器、多仓库开发提供共享记忆、任务监控与飞书遥控。**
+**为多 Agent、多机器、多仓库开发提供共享记忆、只读工作台、任务监控与飞书遥控。**
 
 Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自仓库。
 本地目录建议使用 `~/code/.agents`；Backstage 是项目名，不要求重命名工作区。
@@ -13,8 +13,9 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 
 ## 当前版本
 
-**v0.5.1**：修复初始化覆盖共享内容、同步期间丢失本地编辑和白名单重载问题，
-修正评测/训练运行绑定、告警重试与飞书断线状态。升级注意事项见 [版本记录](docs/changelog.md)。
+**v0.6.0**：新增只读 Web 工作台，按业务项目浏览记忆、时间线、文档及本机运行快照；
+支持深浅主题与手机布局，共享短时快照改善并发读取。使用 `pixi run web` 启动，
+升级注意事项见 [版本记录](docs/changelog.md)。
 
 ## 主要功能
 
@@ -25,6 +26,7 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 | 共享记忆 | raw JSON 供 Agent 读写；`knowledge` 用中文 Markdown、必要时配 SVG，供人阅读和 Agent 导航 |
 | 跨仓库任务 | 稳定 task ID 关联多个 repo，记录事实、决策、来源与任务状态 |
 | S3 同步 | 同步 Skill、Prompt、知识与记忆，检测分叉和事件回退 |
+| 只读工作台 | 按业务项目浏览跨仓记忆、任务和文档，查看本机服务与监控快照；支持深浅主题 |
 | 飞书遥控 | 白名单访问 Claude，按 chat 管理上下文和排队，回传进度与结果 |
 | 监控基础设施 | 服务启停、状态轮询、飞书通知与告警去重；业务数据由适配器解析 |
 
@@ -100,6 +102,17 @@ pixi run watchdog-b1k         # 后台启动
 配置改变后先停止再启动。完整设置见 [工具参考](tools/README.md)。
 
 ## 日常使用
+
+### 只读工作台
+
+```bash
+pixi run web
+# 工作区内访问 http://127.0.0.1:8787
+```
+
+提供总览、项目详情、记忆搜索与时间线、Markdown/SVG 文档预览、本机服务及训练/评测
+状态快照。数据来自现有工作区；没有网页遥控或写入操作。远程工作区需将 8787 端口
+转发到本机后访问。启动与访问边界见 [工作台说明](tools/web/README.md)。
 
 ### Agent 记忆
 
