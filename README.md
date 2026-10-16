@@ -15,7 +15,9 @@ Codex、Claude Code 和 Kimi 共用可追溯的知识，业务代码留在各自
 
 **v0.6.0**：新增只读 Web 工作台，按业务项目浏览记忆、时间线、文档及本机运行快照；
 支持深浅主题与手机布局，共享短时快照改善并发读取。使用 `pixi run web` 启动，
-升级注意事项见 [版本记录](docs/changelog.md)。
+升级注意事项见 [版本记录](docs/changelog.md)。本版 **v0.6.1** 为修 bug 的小版本：
+Windows 可运行补丁放在 [patches/](patches/README.md)，按需在 Windows 机器上应用，
+不进 `main`。
 
 ## 主要功能
 

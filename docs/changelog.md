@@ -7,6 +7,18 @@
 
 这是本工作区的功能版本约定，不等于任何单个脚本的接口版本，也不表示已创建同名 Git tag。
 
+## v0.6.1 · 2026-10-16
+
+- 新增 [`patches/`](../patches/README.md)：Windows 可运行补丁。补丁**不进 `main`**，只在
+  Windows 机器上按需 `git apply`，`main` 的代码与 Linux 线上行为都不变。
+- 补丁覆盖四类改动：缺少 `fcntl` 时用 `msvcrt` 实现文件锁；识别 junction 等 reparse
+  point，无符号链接权限时按目标类型降级（目录用 `mklink /J`，文件用复制）；子进程统一
+  按 UTF-8 解码，避开中文 Windows 默认 GBK 导致的静默解码失败；`os.replace` 在
+  WinError 5 下短暂重试，避免同步停在“部分内容已替换”的状态。
+- 应用后 `tests/` 全量 86 项在 Windows 上连续 3 轮通过；修复 `os.replace` 之前，
+  `test_sync` 6 轮里 5 轮有失败且每轮用例都不同。Linux 未实测，对 Linux 无行为影响的
+  结论来自代码审查。`tools/` 下的服务部署在 Linux，不在补丁范围。
+
 ## v0.6.0 · 2026-10-15
 
 - 更新 README 主图，突出多 Agent、多机器、多仓库共享上下文。

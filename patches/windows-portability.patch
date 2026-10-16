@@ -1,0 +1,469 @@
+diff --git a/scripts/memory.py b/scripts/memory.py
+index 271f500..7f6a3bb 100755
+--- a/scripts/memory.py
++++ b/scripts/memory.py
+@@ -5,7 +5,32 @@ from __future__ import annotations
+ 
+ import argparse
+ import datetime as dt
+-import fcntl
++
++try:
++    import fcntl
++except ImportError:  # Windows 没有 fcntl，用 msvcrt 模拟 flock
++    import msvcrt
++    import os as _os
++
++    class _Fcntl:
++        LOCK_EX = 1
++        LOCK_SH = 2
++        LOCK_UN = 8
++        LOCK_NB = 4
++
++        @staticmethod
++        def flock(fd: int, operation: int) -> None:
++            _os.lseek(fd, 0, _os.SEEK_SET)
++            if operation == _Fcntl.LOCK_UN:
++                try:
++                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
++                except OSError:
++                    pass
++                return
++            mode = msvcrt.LK_NBLCK if operation & _Fcntl.LOCK_NB else msvcrt.LK_LOCK
++            msvcrt.locking(fd, mode, 1)
++
++    fcntl = _Fcntl()
+ import json
+ import os
+ import re
+@@ -92,6 +117,7 @@ def git_value(path: Path, *args: str) -> str | None:
+         check=False,
+         capture_output=True,
+         text=True,
++        encoding="utf-8",
+     )
+     value = result.stdout.strip()
+     return value if result.returncode == 0 and value else None
+diff --git a/scripts/sync.py b/scripts/sync.py
+index d640978..efafbdf 100755
+--- a/scripts/sync.py
++++ b/scripts/sync.py
+@@ -4,16 +4,43 @@
+ from __future__ import annotations
+ 
+ import argparse
+-import fcntl
++
++try:
++    import fcntl
++except ImportError:  # Windows 没有 fcntl，用 msvcrt 模拟 flock
++    import msvcrt
++    import os as _os
++
++    class _Fcntl:
++        LOCK_EX = 1
++        LOCK_SH = 2
++        LOCK_UN = 8
++        LOCK_NB = 4
++
++        @staticmethod
++        def flock(fd: int, operation: int) -> None:
++            _os.lseek(fd, 0, _os.SEEK_SET)
++            if operation == _Fcntl.LOCK_UN:
++                try:
++                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
++                except OSError:
++                    pass
++                return
++            mode = msvcrt.LK_NBLCK if operation & _Fcntl.LOCK_NB else msvcrt.LK_LOCK
++            msvcrt.locking(fd, mode, 1)
++
++    fcntl = _Fcntl()
+ import hashlib
+ import json
+ import os
+ import re
+ import shlex
+ import shutil
++import stat
+ import subprocess
+ import sys
+ import tempfile
++import time
+ import uuid
+ from contextlib import contextmanager
+ from datetime import datetime, timezone
+@@ -52,6 +79,24 @@ def read_json(path: Path) -> dict[str, Any]:
+     return value
+ 
+ 
++def replace_with_retry(source: Path, target: Path) -> None:
++    """把 source 改名覆盖到 target，跨过 Windows 的瞬时占用。
++
++    Windows 上刚写完的文件或目录可能被杀毒或索引进程短暂持有句柄，此时
++    MoveFileEx 返回 WinError 5（拒绝访问），而目标其实已经不存在或被删除。
++    实测本机 40 项同步回归中约 1/15 次会命中，且真实同步会因此停在"部分
++    内容已替换"的状态；短暂重试可跨过这个窗口，非 Windows 平台通常一次成功。
++    """
++    for attempt in range(1, 6):
++        try:
++            os.replace(source, target)
++            return
++        except OSError:
++            if attempt == 5:
++                raise
++            time.sleep(0.05 * attempt)
++
++
+ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+     path.parent.mkdir(parents=True, exist_ok=True)
+     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+@@ -61,7 +106,7 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+             handle.write("\n")
+             handle.flush()
+             os.fsync(handle.fileno())
+-        os.replace(temporary, path)
++        replace_with_retry(temporary, path)
+     finally:
+         temporary.unlink(missing_ok=True)
+ 
+@@ -133,6 +178,7 @@ def run_mc(
+         check=False,
+         capture_output=True,
+         text=True,
++        encoding="utf-8",
+         env=mc_environment(clear_proxy),
+     )
+     if check and result.returncode != 0:
+@@ -206,6 +252,8 @@ def validate_local_memory(root: Path) -> None:
+         check=False,
+         capture_output=True,
+         text=True,
++        encoding="utf-8",
++        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+     )
+     if result.returncode != 0:
+         raise SyncError((result.stderr or result.stdout).strip())
+@@ -423,7 +471,7 @@ def replace_directory(source: Path, target: Path) -> None:
+     shutil.rmtree(temporary, ignore_errors=True)
+     shutil.copytree(source, temporary, ignore=COPY_IGNORE)
+     shutil.rmtree(target, ignore_errors=True)
+-    os.replace(temporary, target)
++    replace_with_retry(temporary, target)
+ 
+ 
+ def install_shared_snapshot(root: Path, snapshot: Path) -> None:
+@@ -443,7 +491,7 @@ def update_shared_base(root: Path, snapshot: Path) -> None:
+     copy_shared_snapshot(snapshot, temporary)
+     shutil.rmtree(base, ignore_errors=True)
+     base.parent.mkdir(parents=True, exist_ok=True)
+-    os.replace(temporary, base)
++    replace_with_retry(temporary, base)
+ 
+ 
+ def clear_shared_conflict(root: Path) -> None:
+@@ -478,7 +526,7 @@ def save_shared_conflict(
+     )
+     shutil.rmtree(conflict, ignore_errors=True)
+     conflict.parent.mkdir(parents=True, exist_ok=True)
+-    os.replace(temporary, conflict)
++    replace_with_retry(temporary, conflict)
+     return conflict
+ 
+ 
+@@ -877,15 +925,40 @@ def resolve_shared(
+     print("已上传合并后的 shared 内容并刷新基线")
+ 
+ 
+-def _link_is_managed(path: Path, managed_root: Path) -> bool:
+-    """该符号链接是否指向共享区内部（含已改名/已失效的旧路径）。
++def _is_reparse(path: Path) -> bool:
++    """Windows 下识别 junction/symlink 等 reparse point(Path.is_symlink 不识别 junction)。"""
++    if os.name != "nt":
++        return False
++    try:
++        return bool(os.lstat(path).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
++    except OSError:
++        return False
+ 
+-    只有本系统自己建的链接才算"可迁移"；指向别处的链接是用户自有配置。
+-    失效链接用 resolve()（非严格）也能拿到目标路径，因此改名后仍可识别。
+-    """
++
++def _readlink_target(path: Path) -> Path | None:
++    r"""读取链接目标；Windows junction 的 readlink 返回值带 \\?\ 扩展前缀，
++    pathlib 不认（is_absolute 为 False 且 resolve 会破坏路径），先剥掉。"""
+     try:
+         current = Path(os.readlink(path))
+     except OSError:
++        return None
++    if os.name == "nt":
++        text = str(current)
++        if text.startswith("\\\\?\\UNC\\"):
++            current = Path("\\\\" + text[len("\\\\?\\UNC\\"):])
++        elif text.startswith("\\\\?\\"):
++            current = Path(text[len("\\\\?\\"):])
++    return current
++
++
++def _link_is_managed(path: Path, managed_root: Path) -> bool:
++    """该链接是否指向共享区内部（含已改名/已失效的旧路径）。
++
++    只有本系统自己建的链接才算"可迁移"；指向别处的链接是用户自有配置。
++    失效链接（含 Windows junction）用 readlink 拿到目标路径，因此改名后仍可识别。
++    """
++    current = _readlink_target(path)
++    if current is None:
+         return False
+     if not current.is_absolute():
+         current = path.parent / current
+@@ -903,24 +976,51 @@ def ensure_link(
+ 
+     指向共享区的旧链接属于本系统管理：共享区目录改名后（如 2026-09-11 的
+     skills→agent/skills）直接改指到新位置；其余已存在的链接、文件或目录一律
+-    不碰——那是用户自己的配置。
++    不碰——那是用户自己的配置。Windows 的 junction 不认作 symlink，需单独识别。
+     """
+-    if path.is_symlink():
++    if path.is_symlink() or _is_reparse(path):
+         if path.resolve() == target.resolve():
+             return
+         if managed_root is not None and _link_is_managed(path, managed_root):
+             if dry_run:
+                 print(f"DRY-RUN: relink {path} -> {target}")
+                 return
+-            path.unlink()
++            try:
++                path.unlink()
++            except OSError:
++                try:
++                    path.rmdir()
++                except OSError:
++                    raise SyncError(f"无法移除失效的旧链接：{path}")
+         else:
+             raise SyncError(f"不会覆盖已有 Agent 配置：{path}")
+     elif path.exists():
++        if os.name == "nt" and path.is_file() and target.is_file():
++            # Windows 无符号链接权限时，文件镜像（AGENTS.md/CLAUDE.md）用复制覆盖
++            if not dry_run:
++                shutil.copy2(target, path)
++                print(f"WARNING: 无权限创建符号链接，已复制到：{path}")
++            return
+         raise SyncError(f"不会覆盖已有 Agent 配置：{path}")
+     if dry_run:
+         print(f"DRY-RUN: ln -s {target} {path}")
+         return
+     path.parent.mkdir(parents=True, exist_ok=True)
++    if os.name == "nt":
++        try:
++            path.symlink_to(target, target_is_directory=target.is_dir())
++        except (OSError, NotImplementedError):
++            if target.is_dir():
++                # Windows 无开发者模式时，目录用 junction（无需管理员权限）
++                subprocess.run(
++                    ["cmd", "/c", "mklink", "/J", str(path), str(target)],
++                    check=True,
++                    capture_output=True,
++                )
++            else:
++                shutil.copy2(target, path)
++                print(f"WARNING: 无权限创建符号链接，已复制到：{path}")
++        return
+     path.symlink_to(target, target_is_directory=target.is_dir())
+ 
+ 
+diff --git a/tests/test_memory.py b/tests/test_memory.py
+index 80457c8..3917dfd 100644
+--- a/tests/test_memory.py
++++ b/tests/test_memory.py
+@@ -4,6 +4,7 @@ import json
+ import importlib.util
+ import io
+ import datetime as dt
++import os
+ import subprocess
+ import sys
+ import tempfile
+@@ -49,6 +50,8 @@ class MemoryCliTest(unittest.TestCase):
+             check=check,
+             capture_output=True,
+             text=True,
++            encoding="utf-8",
++            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+         )
+ 
+     def add(self, title: str, *, agent: str = "codex") -> subprocess.CompletedProcess[str]:
+diff --git a/tests/test_onboarding.py b/tests/test_onboarding.py
+index bdecf43..5baa69d 100644
+--- a/tests/test_onboarding.py
++++ b/tests/test_onboarding.py
+@@ -5,8 +5,10 @@ from __future__ import annotations
+ from argparse import Namespace
+ import importlib.util
+ import json
++import os
+ from pathlib import Path
+ import re
++import shlex
+ import shutil
+ import subprocess
+ import sys
+@@ -28,7 +30,7 @@ class OnboardingTests(unittest.TestCase):
+     def setUp(self):
+         self.temporary = tempfile.TemporaryDirectory()
+         self.directory = Path(self.temporary.name)
+-        self.guide = (ROOT / "examples/README.md").read_text()
++        self.guide = (ROOT / "examples/README.md").read_text(encoding="utf-8")
+ 
+     def tearDown(self):
+         self.temporary.cleanup()
+@@ -49,6 +51,7 @@ class OnboardingTests(unittest.TestCase):
+             [sys.executable, *args],
+             cwd=root,
+             text=True,
++            encoding="utf-8",
+             capture_output=True,
+             timeout=20,
+         )
+@@ -72,11 +75,14 @@ class OnboardingTests(unittest.TestCase):
+             b for b in blocks if b.startswith("python3 scripts/memory.py validate")
+         )
+         # Keep the documented commands, using the current interpreter on CI too.
+-        commands = commands.replace("python3 ", f"{sys.executable} ")
++        # Windows 的解释器路径带反斜杠，直接插进 bash 命令串会被吃掉，先按 shell 规则引用；
++        # 普通 Linux 路径不含特殊字符，shlex.quote 原样返回，行为不变。
++        commands = commands.replace("python3 ", f"{shlex.quote(sys.executable)} ")
+         result = subprocess.run(
+             ["bash", "-e", "-c", commands],
+             cwd=root,
+             text=True,
++            encoding="utf-8",
+             capture_output=True,
+             timeout=20,
+         )
+@@ -194,9 +200,16 @@ class OnboardingTests(unittest.TestCase):
+     def assert_agent_links(self, workspace, agent_home):
+         shared = workspace / ".agents/.share"
+         for name in ("AGENTS.md", "CLAUDE.md"):
+-            self.assertEqual(
+-                (workspace / name).resolve(), shared / "agent/prompts" / name
+-            )
++            if os.name == "nt":
++                # Windows 无符号链接权限时文件镜像降级为副本，比对内容而非链接目标
++                self.assertEqual(
++                    (workspace / name).read_text(encoding="utf-8"),
++                    (shared / "agent/prompts" / name).read_text(encoding="utf-8"),
++                )
++            else:
++                self.assertEqual(
++                    (workspace / name).resolve(), shared / "agent/prompts" / name
++                )
+         for name in (".codex", ".claude", ".kimi-code"):
+             self.assertEqual(
+                 (agent_home / name / "skills/backstage-memory").resolve(),
+diff --git a/tests/test_sync.py b/tests/test_sync.py
+index f4d8c4d..f7c83f2 100644
+--- a/tests/test_sync.py
++++ b/tests/test_sync.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import importlib.util
+ import json
++import os
+ import shutil
+ import subprocess
+ import sys
+@@ -926,13 +927,21 @@ class SyncTest(unittest.TestCase):
+         for agent_home in (".codex", ".claude", ".kimi-code"):
+             for name, relative in expected.items():
+                 link = home / agent_home / "skills" / name
+-                self.assertTrue(link.is_symlink(), f"{link} missing for {name}")
++                if os.name == "nt":
++                    # Windows 无开发者模式时使用 junction 代替符号链接
++                    self.assertTrue(link.exists(), f"未创建链接：{link}")
++                else:
++                    self.assertTrue(link.is_symlink(), f"{link} missing for {name}")
+                 self.assertEqual(
+                     link.resolve(),
+                     (self.root / ".share" / "agent" / "skills" / relative).resolve(),
+                 )
+-        self.assertEqual((workspace / "AGENTS.md").resolve(), (prompts / "AGENTS.md").resolve())
+-        self.assertEqual((workspace / "CLAUDE.md").resolve(), (prompts / "CLAUDE.md").resolve())
++        if os.name == "nt":
++            self.assertEqual((workspace / "AGENTS.md").read_text(encoding="utf-8"), "agents\n")
++            self.assertEqual((workspace / "CLAUDE.md").read_text(encoding="utf-8"), "claude\n")
++        else:
++            self.assertEqual((workspace / "AGENTS.md").resolve(), (prompts / "AGENTS.md").resolve())
++            self.assertEqual((workspace / "CLAUDE.md").resolve(), (prompts / "CLAUDE.md").resolve())
+ 
+     def test_regular_sync_runs_raw_and_shared_paths(self) -> None:
+         args = Namespace(dry_run=False)
+@@ -979,8 +988,15 @@ class SyncTest(unittest.TestCase):
+         self.assertTrue(conflict.is_dir() and not conflict.is_symlink())
+         for agent_home in (".claude", ".kimi-code"):
+             link = home / agent_home / "skills" / "check-goai-eval-status"
+-            self.assertTrue(link.is_symlink())
+-        self.assertTrue((workspace / "AGENTS.md").is_symlink())
++            if os.name == "nt":
++                # Windows 无开发者模式时使用 junction/复制代替符号链接
++                self.assertTrue(link.exists())
++            else:
++                self.assertTrue(link.is_symlink())
++        if os.name == "nt":
++            self.assertTrue((workspace / "AGENTS.md").exists())
++        else:
++            self.assertTrue((workspace / "AGENTS.md").is_symlink())
+ 
+     def test_cli_exposes_explicit_shared_workflow(self) -> None:
+         parser = SYNC.parser()
+@@ -1028,18 +1044,38 @@ class ManagedLinkMigrationTests(unittest.TestCase):
+     def tearDown(self) -> None:
+         self.temporary.cleanup()
+ 
++    def make_link(self, link: Path, target: Path) -> None:
++        """测试夹具建链；Windows 无符号链接权限时改用 junction（可指向不存在的目标）。"""
++        try:
++            link.symlink_to(target, target_is_directory=True)
++        except (OSError, NotImplementedError):
++            if os.name != "nt":
++                raise
++            subprocess.run(
++                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
++                check=True,
++                capture_output=True,
++            )
++
++    def assertIsLinkTo(self, link: Path, target: Path) -> None:
++        """Windows junction 不认作 symlink，按平台断言链接已建且指向目标。"""
++        if os.name == "nt":
++            self.assertTrue(SYNC._is_reparse(link))
++        else:
++            self.assertTrue(link.is_symlink())
++        self.assertEqual(link.resolve(), target.resolve())
++
+     def test_migrates_stale_managed_link(self) -> None:
+         """旧链接指向共享区里已改名的旧路径 → 直接改指到新位置。"""
+         target = self.managed_root / "agent" / "skills" / "memory" / "memory"
+         target.mkdir(parents=True)
+         link = Path(self.temporary.name) / ".codex" / "skills" / "memory"
+         link.parent.mkdir(parents=True)
+-        link.symlink_to(self.managed_root / "skills" / "memory" / "memory")  # 旧布局，已失效
++        self.make_link(link, self.managed_root / "skills" / "memory" / "memory")  # 旧布局，已失效
+ 
+         SYNC.ensure_link(link, target, dry_run=False, managed_root=self.managed_root)
+ 
+-        self.assertTrue(link.is_symlink())
+-        self.assertEqual(link.resolve(), target.resolve())
++        self.assertIsLinkTo(link, target)
+         self.assertTrue(link.exists())  # 不再是断链
+ 
+     def test_keeps_user_owned_link(self) -> None:
+@@ -1050,7 +1086,7 @@ class ManagedLinkMigrationTests(unittest.TestCase):
+         mine.mkdir()
+         link = Path(self.temporary.name) / ".codex" / "skills" / "x"
+         link.parent.mkdir(parents=True)
+-        link.symlink_to(mine)
++        self.make_link(link, mine)
+ 
+         with self.assertRaisesRegex(SYNC.SyncError, "不会覆盖已有 Agent 配置"):
+             SYNC.ensure_link(link, target, dry_run=False, managed_root=self.managed_root)
