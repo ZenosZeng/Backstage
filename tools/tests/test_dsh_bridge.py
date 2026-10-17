@@ -19,6 +19,7 @@ from tools.claude_feishu import harness, sessions as session_state
 def bridge(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_FEISHU_SESSIONS", str(tmp_path / "sessions.json"))
     monkeypatch.setenv("CLAUDE_FEISHU_STATE", str(tmp_path / "seen.json"))
+    monkeypatch.setenv("CLAUDE_FEISHU_WORKDIR", str(tmp_path))
     monkeypatch.setenv("FEISHU_ALLOW_OPEN_IDS", "allowed")
     spec = importlib.util.spec_from_file_location(
         "bridge_dsh_test", ROOT / "tools/claude_feishu/bridge.py"
@@ -311,7 +312,7 @@ def test_epoch_prevents_rebind_but_keeps_stats(bridge):
     assert not bridge.sessions.bucket("chat", "dsh").get("last_used")
 
 
-def test_run_stdin_capture_resume_and_env(bridge, monkeypatch):
+def test_run_stdin_capture_resume_and_env(bridge, monkeypatch, tmp_path):
     monkeypatch.setenv("FEISHU_APP_SECRET", "hidden")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "hidden")
     monkeypatch.setenv("DSH_PERMISSION_MODE", "danger-full-access")
@@ -323,6 +324,7 @@ def test_run_stdin_capture_resume_and_env(bridge, monkeypatch):
     assert "alpha.txt" in answer and state.returncode == 0
     args, kwargs = popen.call_args.args[0], popen.call_args.kwargs
     assert args == [sys.executable, "--profile", "headless", "--json", "-"]
+    assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["stdin"] == subprocess.PIPE
     assert kwargs["start_new_session"]
     assert kwargs["env"]["DSH_PERMISSION_MODE"] == "workspace-write"
