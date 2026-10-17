@@ -183,6 +183,30 @@ class RunClaudeProgressTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(cls.bridge)
 
+    def setUp(self):
+        # Popen is mocked; use a known executable so CLI discovery is host-independent.
+        cli = mock.patch.object(self.bridge, "CLAUDE", sys.executable)
+        cli.start()
+        self.addCleanup(cli.stop)
+        display = mock.patch.dict(os.environ, {"CLAUDE_FEISHU_CLAUDE_MODEL_NAME": ""})
+        display.start()
+        self.addCleanup(display.stop)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def test_missing_claude_is_rejected_before_spawning(self):
+        bridge = self.bridge
+        with (
+            mock.patch.object(bridge, "CLAUDE", str(Path(self.tempdir.name) / "missing-claude")),
+            mock.patch.object(bridge.subprocess, "Popen") as popen,
+        ):
+            out, state = bridge._run_claude("p", "chat")
+        self.assertEqual(out, "本机未安装 claude")
+        self.assertEqual(state.returncode, 1)
+        popen.assert_not_called()
+
     def _stream_proc(self, lines, rc=0, stderr_lines=(), delay=0.0, block_after=False):
         """构造一个 stream-json 形态的假子进程。
 
@@ -373,6 +397,7 @@ class RunClaudeProgressTests(unittest.TestCase):
         bridge = self.bridge
         state = bridge.RunState()
         state.model = "deepseek-flash"
+        state.context_window = 1_000_000
         state.usage = {"input_tokens": 100, "cache_read_input_tokens": 199900}
         line = state.statusline()
         expected_model = f"deepseek-flash {bridge.EFFORT}".strip()
@@ -381,6 +406,12 @@ class RunClaudeProgressTests(unittest.TestCase):
         self.assertNotIn("effort", line)  # effort 不加前缀词，直接跟在模型后
         self.assertNotIn(socket.gethostname(), line)
         self.assertTrue(line.endswith("ctx 20%"), line)
+
+    def test_statusline_without_configured_window_shows_used_tokens(self):
+        state = self.bridge.RunState()
+        state.context_window = 0
+        state.usage = {"input_tokens": 100, "cache_read_input_tokens": 199900}
+        self.assertTrue(state.statusline().endswith("ctx 200k"))
 
     def test_short_path_trims_home_only(self):
         bridge = self.bridge
@@ -857,6 +888,9 @@ class AuditFixTests(unittest.TestCase):
     def setUp(self):
         self.bridge.sessions.chats.clear()
         self.bridge._chat_queues.clear()
+        cli = mock.patch.object(self.bridge, "CLAUDE", sys.executable)
+        cli.start()
+        self.addCleanup(cli.stop)
 
     # --- P1：异常退出路径不能留下活着的子进程组 ---
     def test_wait_timeout_kills_group_before_raising(self):
