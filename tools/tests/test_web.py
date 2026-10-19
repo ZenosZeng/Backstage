@@ -404,6 +404,7 @@ def test_document_http_unicode_excerpt_keeps_query_and_hides_full_text(server, w
     {'workspace_root':''}, {'workspace_root':' '},
     {'projects':{'example':'not-an-object'}}, {'projects':{'example':{}}},
     {'projects':{'example':{'path':None}}}, {'projects':{'example':{'path':' '}}},
+    *({'search_aliases':aliases} for aliases in ([], {'a':'b'}, {'a':['']}, {'':['b']})),
 ])
 def test_invalid_config_is_reported_by_doctor_and_rejected_by_web(server, workspace, updates):
     path = workspace.root / 'config.json'
@@ -416,12 +417,25 @@ def test_invalid_config_is_reported_by_doctor_and_rejected_by_web(server, worksp
     assert exc.value.code == 400
 
 
-def test_web_startup_invalid_config_returns_clean_error(workspace):
+@pytest.mark.parametrize('updates', [{'projects':{'example':{}}}, {'search_aliases':[]}])
+def test_web_startup_invalid_config_returns_clean_error(workspace, updates):
     import sys
     path = workspace.root / 'config.json'
-    path.write_text(json.dumps(json.loads(path.read_text()) | {'projects':{'example':{}}}))
+    path.write_text(json.dumps(json.loads(path.read_text()) | updates))
     result = subprocess.run([sys.executable, '-m', 'tools.web', '--root', str(workspace.root), '--port', '0'],
                             capture_output=True, text=True, encoding='utf-8', timeout=10)
     assert result.returncode == 2
-    assert 'path' in result.stderr and 'memory doctor' in result.stderr
+    assert ('path' in result.stderr or 'search_aliases' in result.stderr) and 'memory doctor' in result.stderr
     assert 'Traceback' not in result.stderr
+
+
+def test_web_can_browse_offline_workspace_while_doctor_reports_local_path_unavailable(server, workspace):
+    offline = workspace.root.parent / 'offline-workspace'
+    offline.write_text('not a local checkout directory')
+    config = workspace.root / 'config.json'
+    config.write_text(json.dumps(json.loads(config.read_text()) | {'workspace_root':str(offline)}))
+    assert fetch(server, '/api/overview')['counts']['events'] == 3
+    report = fetch(server, '/api/doctor')
+    assert report['checks'][0]['state'] == 'error'
+    handoff = fetch(server, '/api/handoff?task=example-task')
+    assert handoff['repositories'][0]['available'] is False

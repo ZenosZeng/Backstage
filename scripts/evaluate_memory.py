@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import contextlib
 import io
 import json
 import os
@@ -16,8 +17,9 @@ import time
 import zipfile
 
 try:
-    from scripts import retrieval
+    from scripts import memory, retrieval
 except ModuleNotFoundError:
+    import memory
     import retrieval
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,8 +28,11 @@ FIXTURE = ROOT / 'tests/fixtures/memory-quality.json'
 
 def fixture_events(dataset):
     defaults = dataset.get('defaults', {})
+    noise_tasks = dataset.get('noise_tasks', 0)
+    if type(noise_tasks) is not int or noise_tasks < 0:
+        raise ValueError('fixture noise_tasks 必须是非负整数')
     events = [defaults | event for event in dataset['events']]
-    for i in range(dataset.get('noise_tasks', 0)):
+    for i in range(noise_tasks):
         events.append(defaults | {'event_id':'noise-'+str(i), 'title':'历史工作记录',
                                   'content':{'what':'常规进展', 'where':['synthetic fixture']},
                                   'event_type':'progress', 'task_id':'historical-unclassified-task-'+str(i)})
@@ -35,21 +40,21 @@ def fixture_events(dataset):
 
 
 def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dict:
+    if baseline_ref is not None and (not isinstance(baseline_ref, str) or not baseline_ref.strip()):
+        raise ValueError('基线版本必须是非空本地 Git 引用')
     dataset = json.loads(fixture.read_text(encoding='utf-8'))
     if (not isinstance(dataset, dict) or not isinstance(dataset.get('config'), dict)
-            or not isinstance(dataset.get('events'), list) or not isinstance(dataset.get('cases'), list)
+            or not isinstance(dataset.get('events'), list) or not isinstance(dataset.get('cases'), list) or not dataset['cases']
             or not isinstance(dataset.get('documents', {}), dict)):
-        raise ValueError('fixture 必须包含 config 对象、events/cases 数组；documents 必须是对象')
+        raise ValueError('fixture 必须包含 config 对象、events 数组、非空 cases 数组；documents 必须是对象')
     with tempfile.TemporaryDirectory(prefix='backstage-quality-') as directory:
         root = Path(directory) / '.agents'
         root.mkdir()
         config = dataset['config'] | {'workspace_root': str(root.parent), 'projects': {}}
         # Event sources are synthetic and unregistered deliberately: no host repo reads.
         (root / 'config.json').write_text(json.dumps(config), encoding='utf-8')
-        daily = root / '.share/memory/fixture-machine/codex/2026-10-19.json'
-        daily.parent.mkdir(parents=True)
-        daily.write_text(json.dumps({'schema_version':1, 'machine_id':'fixture-machine', 'agent':'codex',
-                                     'date':'2026-10-19', 'events':fixture_events(dataset)}), encoding='utf-8')
+        memory.load_config(root)
+        memory.append_events(root, fixture_events(dataset))
         for path, text in dataset.get('documents', {}).items():
             if not isinstance(path, str) or not isinstance(text, str) or Path(path).is_absolute():
                 raise ValueError('fixture 文档必须使用相对路径和文本内容')
@@ -74,28 +79,57 @@ def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dic
             script = cwd / 'scripts/memory.py'
             if not script.is_file():
                 raise ValueError('基线版本缺少 scripts/memory.py')
-            # Resolve all CLI modules from that revision, not the current checkout.
-            environment['PYTHONPATH'] = str(cwd)
-        rows = []
+        # Resolve both sides from their own source tree, ignoring external module paths.
+        environment['PYTHONPATH'] = str(cwd)
+        commands = []
         for case in dataset['cases']:
-            if (not isinstance(case, dict) or case.get('kind') not in {'search', 'documents', 'brief', 'handoff'}
+            if (not isinstance(case, dict) or not isinstance(case.get('kind'), str)
+                    or case['kind'] not in {'search', 'documents', 'brief', 'handoff'}
                     or not isinstance(case.get('expected'), list)
                     or any(not isinstance(value, str) for value in case['expected'])):
                 raise ValueError('fixture 用例必须提供有效 kind 和字符串数组 expected')
             kind = case['kind']
+            if not isinstance(case.get('name'), str) or not case['name'].strip():
+                raise ValueError('fixture 用例 name 必须是非空字符串')
+            if not isinstance(case.get('forbidden', []), list) or any(not isinstance(v, str) for v in case.get('forbidden', [])):
+                raise ValueError('fixture forbidden 必须是字符串数组')
+            if 'first' in case and (kind not in {'search', 'documents'} or not isinstance(case['first'], str) or not case['first']):
+                raise ValueError('fixture first 仅用于检索用例，必须是非空字符串')
+            if 'current' in case and (kind != 'search' or not isinstance(case['current'], bool)):
+                raise ValueError('fixture current 仅用于记忆检索，必须是布尔值')
+            for key in ('project', 'task', 'sort'):
+                if key in case and (not isinstance(case[key], str) or not case[key].strip()):
+                    raise ValueError('fixture project/task/sort 必须是非空字符串')
+            if kind == 'documents' and any(key in case for key in ('project', 'task', 'current')):
+                raise ValueError('fixture 文档检索不接受事件筛选')
             if kind in {'search', 'documents'}:
-                arguments = ['search', case['query'], '--json', '--limit', '5']
+                if not isinstance(case.get('query'), str):
+                    raise ValueError('fixture 检索 query 必须是字符串，允许空查询')
+                arguments = ['search', '--json', '--limit', '5']
                 if kind == 'documents':
                     arguments.append('--documents')
                 elif case.get('current', True):
                     arguments.append('--current')
             elif kind == 'brief':
+                if type(case.get('max_chars')) is not int or case['max_chars'] <= 0:
+                    raise ValueError('fixture brief max_chars 必须是正整数')
                 arguments = ['brief', '--max-chars', str(case['max_chars'])]
             else:
                 arguments = ['handoff', '--json']
             for key in ('project', 'task', 'sort'):
                 if key in case:
-                    arguments += ['--' + key, case[key]]
+                    arguments.append('--' + key + '=' + case[key])
+            if kind in {'search', 'documents'}:
+                arguments += ['--', case['query']]
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    memory.parser().parse_args(arguments)
+            except (SystemExit, TypeError) as exc:
+                raise ValueError('fixture 用例包含无效 CLI 参数') from exc
+            commands.append((case, arguments))
+        rows = []
+        for case, arguments in commands:
+            kind = case['kind']
             start = time.perf_counter()
             result = subprocess.run([sys.executable, str(script), '--root', str(root), *arguments], cwd=cwd,
                                     capture_output=True, text=True, encoding='utf-8', timeout=15, env=environment)

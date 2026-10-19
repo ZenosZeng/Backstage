@@ -225,6 +225,23 @@ class MemoryQualityTests(unittest.TestCase):
         self.assertIn('未应用别名', err.getvalue())
         self.assertNotIn('sensitive-config-value', err.getvalue())
 
+    def test_broken_config_symlink_warns_while_missing_optional_config_is_silent(self):
+        docs = self.root / 'docs'
+        docs.mkdir()
+        (docs / 'entry.md').write_text('# Note\nneedle evidence')
+        config = self.root / 'config.json'
+        config.unlink()
+        config.symlink_to(Path(self.temp.name) / 'missing-config.json')
+        result = self.cli('search', 'needle', '--documents', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout))
+        self.assertIn('未应用别名', result.stderr)
+        config.unlink()
+        result = self.cli('search', 'needle', '--documents', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout))
+        self.assertFalse(result.stderr)
+
     def test_symlinked_document_root_does_not_grant_external_access(self):
         external = Path(self.temp.name) / 'external'
         external.mkdir()
@@ -299,6 +316,7 @@ class MemoryQualityTests(unittest.TestCase):
             {'workspace_root':''}, {'workspace_root':'   '}, {'workspace_root':None},
             {'projects':[]}, {'projects':{'atlas':'not-an-object'}}, {'projects':{'atlas':{}}},
             *({'projects':{'atlas':{'path':path}}} for path in (None, '', '   ', [], 123)),
+            *({'search_aliases':aliases} for aliases in ([], {'a':'b'}, {'a':['']}, {'':['b']})),
         ]
         for updates in invalid:
             with self.subTest(updates=updates):
@@ -357,7 +375,9 @@ class MemoryQualityTests(unittest.TestCase):
         outside = Path(self.temp.name) / 'outside.md'
         outside.write_text('preserve')
         for path in (str(outside), '../../' + outside.name, 'docs/../../../' + outside.name, 'config.json'):
-            fixture = self.fixture(documents={path:'overwritten'}, cases=[])
+            fixture = self.fixture(documents={path:'overwritten'}, cases=[
+                {'name':'path-guard','kind':'search','query':'absent-needle','expected':[]},
+            ])
             with self.assertRaises(ValueError):
                 evaluate_memory.evaluate(fixture)
             self.assertEqual(outside.read_text(), 'preserve')
@@ -390,17 +410,20 @@ class MemoryQualityTests(unittest.TestCase):
         (external / 'scripts').mkdir(parents=True)
         (external / 'scripts/__init__.py').write_text('')
         (external / 'scripts/retrieval.py').write_text('raise RuntimeError("foreign module imported")')
-        with mock.patch.dict('os.environ', {'PYTHONPATH':str(external)}):
-            result = evaluate_memory.evaluate(baseline_ref='HEAD')
-        self.assertEqual(result['cases'], 30)
-        self.assertEqual(result['passed'], 30, [r for r in result['results'] if not r['passed']])
+        for baseline in (None, 'HEAD'):
+            with self.subTest(baseline=baseline), mock.patch.dict('os.environ', {'PYTHONPATH':str(external)}):
+                result = evaluate_memory.evaluate(baseline_ref=baseline)
+            self.assertEqual(result['cases'], 30)
+            self.assertEqual(result['passed'], 30, [r for r in result['results'] if not r['passed']])
 
     def test_evaluator_bad_ref_and_malformed_fixture_have_clean_error_exit(self):
         script = str(Path(evaluate_memory.__file__))
-        result = subprocess.run([sys.executable, script, '--baseline-ref', 'not-a-real-ref-pr2'], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('基线版本', result.stderr)
-        self.assertNotIn('Traceback', result.stderr)
+        for ref in ('not-a-real-ref-pr2', '', '   '):
+            result = subprocess.run([sys.executable, script, '--baseline-ref=' + ref], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('基线版本', result.stderr)
+            self.assertFalse(result.stdout)
+            self.assertNotIn('Traceback', result.stderr)
         for data in ([], {}, self.dataset | {'documents':[]}, self.dataset | {'cases':[{}]},
                      self.dataset | {'cases':[{'name':'missing-query','kind':'search','expected':[]}]},
                      self.dataset | {'cases':[{'name':'bad-kind','kind':'typo','expected':[]}]}):
@@ -420,6 +443,51 @@ class MemoryQualityTests(unittest.TestCase):
         self.assertIn('执行超时', err.getvalue())
         self.assertNotIn('Traceback', err.getvalue())
         self.assertFalse(out.getvalue())
+
+    def test_evaluator_rejects_invalid_case_arguments_and_data_before_scoring(self):
+        search = {'name':'query','kind':'search','query':'absent-needle','expected':[]}
+        invalid_cases = [
+            [], [{'name':'budget','kind':'brief','max_chars':'oops','expected':[]}],
+            [{'name':'budget','kind':'brief','max_chars':True,'expected':[]}],
+            [{'name':'budget','kind':'brief','max_chars':0,'expected':[]}],
+            [{'name':'handover','kind':'handoff','expected':[]}],
+            [{'name':'handover','kind':'handoff','task':'','expected':[]}],
+            [search | {'sort':'invalid'}], [search | {'query':123}],
+            [search | {'forbidden':'needle'}], [search | {'first':False}],
+            [search | {'current':'false'}], [search | {'project':[]}],
+            [search | {'kind':'documents','project':'atlas'}],
+            [search | {'name':''}],
+        ]
+        datasets = [self.dataset | {'cases':cases} for cases in invalid_cases]
+        datasets += [self.dataset | {'config':{'workspace':[],'machine_id':'fixture'}},
+                     self.dataset | {'events':[{'event_id':'broken'}], 'noise_tasks':0},
+                     *(self.dataset | {'noise_tasks':value} for value in (-1, True, 1.5))]
+        for data in datasets:
+            fixture = Path(self.temp.name) / 'invalid-arguments.json'
+            fixture.write_text(json.dumps(data))
+            result = subprocess.run([sys.executable, str(Path(evaluate_memory.__file__)), '--fixture', str(fixture)],
+                                    capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertFalse(result.stdout)
+            self.assertIn('memory-eval:', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+
+    def test_evaluator_accepts_valid_empty_queries_and_preserves_quality_failure_exit(self):
+        cases = [
+            {'name':'all-events','kind':'search','query':'','expected':['interface-old']},
+            {'name':'all-documents','kind':'documents','query':'','expected':['docs/note.md']},
+            {'name':'literal-option','kind':'search','query':'--help','expected':[]},
+        ]
+        fixture = self.fixture(cases=cases, events=self.dataset['events'][:1], noise_tasks=0,
+                               documents={'docs/note.md':'# Note'})
+        report = evaluate_memory.evaluate(fixture)
+        self.assertEqual(report['passed'], 3)
+        fixture = self.fixture(cases=[{'name':'valid-miss','kind':'search','query':'absent-needle','expected':['interface-old']}])
+        result = subprocess.run([sys.executable, str(Path(evaluate_memory.__file__)), '--fixture', str(fixture)],
+                                capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)['passed'], 0)
+        self.assertFalse(result.stderr)
 
 
 if __name__ == '__main__':

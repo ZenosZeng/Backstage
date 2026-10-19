@@ -8,10 +8,9 @@ from pathlib import Path
 import shutil
 
 try:
-    from scripts import memory, retrieval, sync
+    from scripts import memory, sync
 except ModuleNotFoundError:
     import memory
-    import retrieval
     import sync
 
 
@@ -23,7 +22,6 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
         checks.append({'name': name, 'state': state, 'detail': detail, 'hint': hint})
     try:
         config = memory.load_config(root)
-        retrieval.query_groups('', config.get('search_aliases', {}))
         if not memory.workspace_root(config).is_dir():
             raise ValueError('Invalid workspace configuration')
         add('配置', 'ok', '工作区身份、项目路径与搜索别名格式有效')
