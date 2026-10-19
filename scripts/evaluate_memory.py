@@ -113,6 +113,8 @@ def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dic
             elif kind == 'brief':
                 if type(case.get('max_chars')) is not int or case['max_chars'] <= 0:
                     raise ValueError('fixture brief max_chars 必须是正整数')
+                if not case.get('project') and not case.get('task'):
+                    raise ValueError('fixture brief 必须提供 project 或 task')
                 arguments = ['brief', '--max-chars', str(case['max_chars'])]
             else:
                 arguments = ['handoff', '--json']

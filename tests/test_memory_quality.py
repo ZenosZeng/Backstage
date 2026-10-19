@@ -447,9 +447,9 @@ class MemoryQualityTests(unittest.TestCase):
     def test_evaluator_rejects_invalid_case_arguments_and_data_before_scoring(self):
         search = {'name':'query','kind':'search','query':'absent-needle','expected':[]}
         invalid_cases = [
-            [], [{'name':'budget','kind':'brief','max_chars':'oops','expected':[]}],
-            [{'name':'budget','kind':'brief','max_chars':True,'expected':[]}],
-            [{'name':'budget','kind':'brief','max_chars':0,'expected':[]}],
+            [], [{'name':'budget','kind':'brief','project':'atlas-core','max_chars':'oops','expected':[]}],
+            [{'name':'budget','kind':'brief','project':'atlas-core','max_chars':True,'expected':[]}],
+            [{'name':'budget','kind':'brief','project':'atlas-core','max_chars':0,'expected':[]}],
             [{'name':'handover','kind':'handoff','expected':[]}],
             [{'name':'handover','kind':'handoff','task':'','expected':[]}],
             [search | {'sort':'invalid'}], [search | {'query':123}],
@@ -488,6 +488,20 @@ class MemoryQualityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)['passed'], 0)
         self.assertFalse(result.stderr)
+
+    def test_evaluator_brief_requires_a_selector_and_accepts_either_valid_selector(self):
+        case = {'name':'brief','kind':'brief','max_chars':100,'expected':[]}
+        fixture = self.fixture(cases=[case])
+        result = subprocess.run([sys.executable, str(Path(evaluate_memory.__file__)), '--fixture', str(fixture)],
+                                capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(result.stdout)
+        self.assertIn('project 或 task', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        fixture = self.fixture(cases=[case | {'project':'atlas-core'}, case | {'task':'atlas-delivery'}])
+        report = evaluate_memory.evaluate(fixture)
+        self.assertEqual(report['cases'], 2)
+        self.assertEqual(report['passed'], 2)
 
 
 if __name__ == '__main__':
