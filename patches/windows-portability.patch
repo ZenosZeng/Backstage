@@ -35,7 +35,7 @@ diff --git a/scripts/memory.py b/scripts/memory.py
  import json
  import os
  import re
-@@ -96,6 +121,7 @@
+@@ -104,6 +129,7 @@
          result = subprocess.run(
              ["git", "--no-optional-locks", "-C", str(path), *args],
              check=False, capture_output=True, text=True, timeout=timeout,
@@ -271,6 +271,25 @@ diff --git a/scripts/sync.py b/scripts/sync.py
      path.symlink_to(target, target_is_directory=target.is_dir())
  
  
+diff --git a/scripts/doctor.py b/scripts/doctor.py
+--- a/scripts/doctor.py
++++ b/scripts/doctor.py
+@@ -5,4 +5,5 @@
+ from collections import Counter
+ from datetime import datetime, timezone
++import os
+ from pathlib import Path
+ import shutil
+@@ -61,5 +62,8 @@
+                     if not path.exists() and not path.is_symlink():
+                         missing.append(path)
+-                    elif not target.exists() or path.resolve() != target.resolve():
++                    elif not target.exists() or (path.resolve() != target.resolve() and not (
++                        os.name == "nt" and not path.is_symlink() and path.is_file() and target.is_file()
++                        and path.read_bytes() == target.read_bytes()
++                    )):
+                         wrong.append(path)
+                 except (OSError, RuntimeError):
 diff --git a/tests/test_memory.py b/tests/test_memory.py
 --- a/tests/test_memory.py
 +++ b/tests/test_memory.py

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -185,6 +187,44 @@ class MemoryQualityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(json.loads(result.stdout))
 
+    def test_corrupt_optional_config_does_not_block_raw_or_document_recovery_reads(self):
+        docs = self.root / 'docs'
+        docs.mkdir()
+        (docs / 'entry.md').write_text('# Note\nneedle evidence')
+        for config in ('{sensitive-broken-value', '[]', '{"search_aliases": []}'):
+            (self.root / 'config.json').write_text(config)
+            for args in (('recent', '--json', '--limit', '1'), ('search', '缓冲区', '--json'),
+                         ('search', 'needle', '--documents', '--json')):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(json.loads(result.stdout))
+                if args[0] == 'search':
+                    self.assertIn('未应用别名', result.stderr)
+                self.assertNotIn('sensitive-broken-value', result.stderr)
+        # A raw copy may carry only its optional alias map, without a complete workspace config.
+        (self.root / 'config.json').write_text(json.dumps({'search_aliases':self.config['search_aliases']}))
+        result = self.cli('search', 'starboard', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout))
+        self.assertFalse(result.stderr)
+
+    def test_unreadable_optional_config_warns_without_exposing_values(self):
+        docs = self.root / 'docs'
+        docs.mkdir()
+        (docs / 'entry.md').write_text('# Note\nneedle evidence')
+        read_json = memory.read_json
+        def read(path):
+            if path == self.root / 'config.json':
+                raise PermissionError('sensitive-config-value')
+            return read_json(path)
+        out, err = io.StringIO(), io.StringIO()
+        args = memory.parser().parse_args(['search', 'needle', '--documents', '--json'])
+        with mock.patch.object(memory, 'read_json', side_effect=read), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(memory.command_list(self.root, args), 0)
+        self.assertTrue(json.loads(out.getvalue()))
+        self.assertIn('未应用别名', err.getvalue())
+        self.assertNotIn('sensitive-config-value', err.getvalue())
+
     def test_symlinked_document_root_does_not_grant_external_access(self):
         external = Path(self.temp.name) / 'external'
         external.mkdir()
@@ -254,6 +294,51 @@ class MemoryQualityTests(unittest.TestCase):
             self.assertEqual(report['state'], 'error')
             self.assertEqual(report['checks'][0]['state'], 'error')
 
+    def test_shared_config_validation_rejects_blank_root_and_invalid_project_paths(self):
+        invalid = [
+            {'workspace_root':''}, {'workspace_root':'   '}, {'workspace_root':None},
+            {'projects':[]}, {'projects':{'atlas':'not-an-object'}}, {'projects':{'atlas':{}}},
+            *({'projects':{'atlas':{'path':path}}} for path in (None, '', '   ', [], 123)),
+        ]
+        for updates in invalid:
+            with self.subTest(updates=updates):
+                (self.root / 'config.json').write_text(json.dumps(self.config | updates))
+                with self.assertRaises(ValueError):
+                    memory.load_config(self.root)
+                report = doctor.inspect_workspace(self.root, home=Path(self.temp.name) / 'home')
+                self.assertEqual(report['state'], 'error')
+                self.assertEqual(report['checks'][0]['state'], 'error')
+
+    def test_windows_patch_doctor_accepts_only_matching_regular_prompt_copies(self):
+        # Execute the actual out-of-tree doctor patch on Linux; this is not a Windows runtime test.
+        patched = Path(self.temp.name) / 'patched'
+        (patched / 'scripts').mkdir(parents=True)
+        (patched / 'scripts/doctor.py').write_bytes(Path(doctor.__file__).read_bytes())
+        subprocess.run(['git', 'apply', '--include=scripts/doctor.py',
+                        str(Path(memory.__file__).parents[1] / 'patches/windows-portability.patch')],
+                       cwd=patched, check=True, capture_output=True)
+        spec = importlib.util.spec_from_file_location('patched_doctor', patched / 'scripts/doctor.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source = Path(self.temp.name) / 'shared-prompt.md'
+        copy = Path(self.temp.name) / 'installed-prompt.md'
+        source.write_text('same prompt')
+        copy.write_bytes(source.read_bytes())
+        def check(platform):
+            module.os = SimpleNamespace(name=platform)
+            with mock.patch.object(module.sync, 'agent_links', return_value=[(copy, source)]):
+                report = module.inspect_workspace(self.root, home=Path(self.temp.name) / 'home')
+            return next(c['state'] for c in report['checks'] if c['name']=='Skill 与入口链接')
+        self.assertEqual(check('posix'), 'warning')
+        self.assertEqual(check('nt'), 'ok')
+        copy.write_text('outdated prompt')
+        self.assertEqual(check('nt'), 'warning')
+        copy.unlink()
+        other = Path(self.temp.name) / 'other-prompt.md'
+        other.write_bytes(source.read_bytes())
+        copy.symlink_to(other)
+        self.assertEqual(check('nt'), 'warning')  # Unrelated symlinks still have the wrong source.
+
     def test_git_snapshot_does_not_report_failed_status_as_clean(self):
         repo = Path(self.temp.name) / 'repo'
         repo.mkdir()
@@ -299,6 +384,42 @@ class MemoryQualityTests(unittest.TestCase):
         self.assertEqual(result['cases'], 30)
         self.assertEqual(result['passed'], 30, [r for r in result['results'] if not r['passed']])
         self.assertEqual(result['evidence_recall_at_5'], 1.0)
+
+    def test_baseline_head_restores_its_own_cli_dependencies(self):
+        external = Path(self.temp.name) / 'foreign'
+        (external / 'scripts').mkdir(parents=True)
+        (external / 'scripts/__init__.py').write_text('')
+        (external / 'scripts/retrieval.py').write_text('raise RuntimeError("foreign module imported")')
+        with mock.patch.dict('os.environ', {'PYTHONPATH':str(external)}):
+            result = evaluate_memory.evaluate(baseline_ref='HEAD')
+        self.assertEqual(result['cases'], 30)
+        self.assertEqual(result['passed'], 30, [r for r in result['results'] if not r['passed']])
+
+    def test_evaluator_bad_ref_and_malformed_fixture_have_clean_error_exit(self):
+        script = str(Path(evaluate_memory.__file__))
+        result = subprocess.run([sys.executable, script, '--baseline-ref', 'not-a-real-ref-pr2'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('基线版本', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        for data in ([], {}, self.dataset | {'documents':[]}, self.dataset | {'cases':[{}]},
+                     self.dataset | {'cases':[{'name':'missing-query','kind':'search','expected':[]}]},
+                     self.dataset | {'cases':[{'name':'bad-kind','kind':'typo','expected':[]}]}):
+            fixture = Path(self.temp.name) / 'invalid-fixture.json'
+            fixture.write_text(json.dumps(data))
+            result = subprocess.run([sys.executable, script, '--fixture', str(fixture)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('memory-eval:', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+
+    def test_evaluator_cli_timeout_is_an_execution_error_without_a_quality_score(self):
+        err, out = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, 'argv', ['evaluate_memory.py']), \
+                mock.patch.object(subprocess, 'run', side_effect=subprocess.TimeoutExpired('synthetic CLI', 15)), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            self.assertEqual(evaluate_memory.main(), 2)
+        self.assertIn('执行超时', err.getvalue())
+        self.assertNotIn('Traceback', err.getvalue())
+        self.assertFalse(out.getvalue())
 
 
 if __name__ == '__main__':

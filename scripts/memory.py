@@ -82,8 +82,16 @@ def load_config(root: Path) -> dict[str, Any]:
     for key in ("workspace", "workspace_root", "machine_id"):
         if key not in config:
             raise ValueError(f"配置文件缺少字段：{key}")
-    if not SAFE_NAME.fullmatch(str(config["machine_id"])):
+        if not isinstance(config[key], str) or not config[key].strip():
+            raise ValueError(f"配置字段 {key} 必须是非空字符串")
+    if not SAFE_NAME.fullmatch(config["machine_id"]):
         raise ValueError("machine_id 只能包含字母、数字、点、下划线和连字符")
+    projects = config.get("projects", {})
+    if not isinstance(projects, dict):
+        raise ValueError("配置字段 projects 必须是 JSON object")
+    for item in projects.values():
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
+            raise ValueError("projects 中每个项目必须配置非空字符串 path")
     return config
 
 
@@ -879,7 +887,18 @@ def command_import(root: Path, args: argparse.Namespace) -> int:
 
 
 def command_list(root: Path, args: argparse.Namespace) -> int:
-    args.aliases = load_config(root).get("search_aliases", {}) if (root / "config.json").exists() else {}
+    args.aliases = {}
+    if getattr(args, "query", None) and args.query.strip() and (root / "config.json").exists():
+        # Recovery reads need only optional aliases, not workspace identity or Git config.
+        try:
+            config = read_json(root / "config.json")
+            if not isinstance(config, dict):
+                raise ValueError("配置必须是 object")
+            args.aliases = config.get("search_aliases", {})
+            retrieval.query_groups('', args.aliases)
+        except (OSError, ValueError):
+            args.aliases = {}
+            print("警告：配置或搜索别名不可用；本次按原词检索，未应用别名。", file=sys.stderr)
     if getattr(args, "documents", False):
         if any(getattr(args, key, None) for key in ("project", "task", "agent", "machine", "topic", "since", "until")) or args.current:
             raise ValueError("文档搜索不使用事件筛选；业务范围请从工作台文档中心选择")

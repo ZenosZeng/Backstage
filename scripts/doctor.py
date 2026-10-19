@@ -24,13 +24,9 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
     try:
         config = memory.load_config(root)
         retrieval.query_groups('', config.get('search_aliases', {}))
-        if (not isinstance(config['workspace'], str) or not config['workspace'].strip()
-                or not isinstance(config['machine_id'], str)
-                or not isinstance(config['workspace_root'], str)
-                or not isinstance(config.get('projects', {}), dict)
-                or not memory.workspace_root(config).is_dir()):
+        if not memory.workspace_root(config).is_dir():
             raise ValueError('Invalid workspace configuration')
-        add('配置', 'ok', '工作区身份与搜索别名格式有效')
+        add('配置', 'ok', '工作区身份、项目路径与搜索别名格式有效')
     except (OSError, ValueError, TypeError, AttributeError):
         config = None
         add('配置', 'error', '配置缺失、不可读或字段无效', '检查 config.json；自检不输出配置值或凭据。')

@@ -369,7 +369,9 @@ pixi run memory doctor --json
 文档模式搜索允许目录的标题、路径和 Markdown 正文，返回路径及命中行摘录；
 摘录使用 NFKC 显示文本，Unicode 展开不影响命中位置；文档预览保留原文。
 空查询列出文档。此模式不加载 raw memory，损坏的事件文件不阻断文档检索。
-`search` / `recent` 在无 `config.json` 的 raw 副本上仍可读取，使用默认无别名匹配。
+`search` / `recent` 在无 `config.json` 的 raw 副本上仍可读取。独立检索只读取可选
+`search_aliases`，不要求完整工作区配置；无关键词时不读取配置。配置或别名损坏、
+不可读时，带关键词的 CLI 检索向 stderr 明确告警，再按原词匹配，JSON 输出仍可解析。
 SVG 只搜索标题和路径，不解析其 XML 正文。文档没有 Agent、task、生命周期等事件
 字段，因此 `--documents` 与事件筛选组合时拒绝执行；业务文档范围可在网页选择。
 这些命令不创建索引、数据库或后台同步服务。
@@ -388,12 +390,15 @@ shared 基线时间不能证明最近一次 raw 同步成功。
 网页自检的基线和冲突取自 `--local-root`，结果标明本机状态目录；CLI 默认使用
 `<root>/.local`。符号链接循环按异常链接报告。Git 缺失或不可执行时，交接仍可读取，
 当前仓库状态标为不可用。
+配置身份字段必须是非空字符串，每个项目项必须是对象并含非空字符串 `path`；
+自检、交接和网页共用格式校验，网页启动失败时提示运行 `memory doctor`。
 
 ## 固定质量评测
 
 ```bash
 pixi run memory-eval
-pixi run memory-eval --baseline-ref origin/main
+pixi run memory-eval --baseline-ref HEAD
+pixi run memory-eval --baseline-ref 298effa
 ```
 
 30 个合成样例及预期来源在 `tests/fixtures/memory-quality.json`，不含真实工作区记忆。
@@ -403,3 +408,7 @@ pixi run memory-eval --baseline-ref origin/main
 分数不能外推成实际全部任务准确率。工具不调用模型或远端，临时数据在退出时清理。
 自定义 fixture 的文档只能写入临时工作区允许的文档目录，绝对路径和目录逃逸会报错。
 检索用例的 `expected: []` 要求结果为空；没有正例时，命中率及召回率为 `null`。
+基线从指定本地 Git 提交导出整个 `scripts/`，使用该版本的 CLI 和依赖模块；不会混入
+当前工作区或外部 `PYTHONPATH` 的模块。`HEAD` 可用于自对照，`298effa` 是旧 v0.6.1
+提交示例；引用需已存在于本地 Git。基线读取失败、畸形 fixture 或 CLI 超时属于运行
+错误，向 stderr 报错并退出 2，不生成质量得分；用例未通过仍退出 1，全部通过退出 0。

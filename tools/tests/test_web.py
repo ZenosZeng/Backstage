@@ -398,3 +398,30 @@ def test_document_http_unicode_excerpt_keeps_query_and_hides_full_text(server, w
     assert len(result) == 1
     assert 'target evidence' in result[0]['excerpt']
     assert 'text' not in result[0]
+
+
+@pytest.mark.parametrize('updates', [
+    {'workspace_root':''}, {'workspace_root':' '},
+    {'projects':{'example':'not-an-object'}}, {'projects':{'example':{}}},
+    {'projects':{'example':{'path':None}}}, {'projects':{'example':{'path':' '}}},
+])
+def test_invalid_config_is_reported_by_doctor_and_rejected_by_web(server, workspace, updates):
+    path = workspace.root / 'config.json'
+    path.write_text(json.dumps(json.loads(path.read_text()) | updates))
+    report = fetch(server, '/api/doctor')
+    assert report['state'] == 'error'
+    assert report['checks'][0]['state'] == 'error'
+    with pytest.raises(HTTPError) as exc:
+        urlopen(server + '/api/overview')
+    assert exc.value.code == 400
+
+
+def test_web_startup_invalid_config_returns_clean_error(workspace):
+    import sys
+    path = workspace.root / 'config.json'
+    path.write_text(json.dumps(json.loads(path.read_text()) | {'projects':{'example':{}}}))
+    result = subprocess.run([sys.executable, '-m', 'tools.web', '--root', str(workspace.root), '--port', '0'],
+                            capture_output=True, text=True, encoding='utf-8', timeout=10)
+    assert result.returncode == 2
+    assert 'path' in result.stderr and 'memory doctor' in result.stderr
+    assert 'Traceback' not in result.stderr

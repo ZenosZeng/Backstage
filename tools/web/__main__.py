@@ -111,7 +111,10 @@ def main():
     parser.add_argument("--local-root", type=Path)
     args = parser.parse_args()
     workspace = Workspace(args.root, args.local_root or (local_root() if args.root == ROOT else args.root / ".local"))
-    memory_config = workspace.snapshot()["config"]
+    try:
+        memory_config = workspace.snapshot()["config"]
+    except (OSError, ValueError) as error:
+        parser.error(f"无法读取工作区：{error}；运行 memory doctor 检查配置和数据。")
     with Server(("127.0.0.1", args.port), workspace) as server:
         print(f"Backstage · {memory_config['workspace']} · http://127.0.0.1:{server.server_port}", flush=True)
         try:

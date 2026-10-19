@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import io
 import json
+import os
 from pathlib import Path
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 try:
     from scripts import retrieval
@@ -33,6 +36,10 @@ def fixture_events(dataset):
 
 def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dict:
     dataset = json.loads(fixture.read_text(encoding='utf-8'))
+    if (not isinstance(dataset, dict) or not isinstance(dataset.get('config'), dict)
+            or not isinstance(dataset.get('events'), list) or not isinstance(dataset.get('cases'), list)
+            or not isinstance(dataset.get('documents', {}), dict)):
+        raise ValueError('fixture 必须包含 config 对象、events/cases 数组；documents 必须是对象')
     with tempfile.TemporaryDirectory(prefix='backstage-quality-') as directory:
         root = Path(directory) / '.agents'
         root.mkdir()
@@ -53,13 +60,28 @@ def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dic
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding='utf-8')
         script = ROOT / 'scripts/memory.py'
+        cwd = ROOT
+        environment = os.environ.copy()
+        environment['PYTHONDONTWRITEBYTECODE'] = '1'
         if baseline_ref:
-            source = subprocess.run(['git', 'show', baseline_ref + ':scripts/memory.py'], cwd=ROOT,
-                                    check=True, capture_output=True).stdout
-            script = Path(directory) / 'baseline-memory.py'
-            script.write_bytes(source)
+            revision = subprocess.run(['git', 'rev-parse', '--verify', '--end-of-options', baseline_ref + '^{commit}'],
+                                      cwd=ROOT, check=True, capture_output=True, text=True).stdout.strip()
+            archive = subprocess.run(['git', 'archive', '--format=zip', revision, 'scripts'],
+                                     cwd=ROOT, check=True, capture_output=True).stdout
+            cwd = Path(directory) / 'baseline'
+            with zipfile.ZipFile(io.BytesIO(archive)) as snapshot:
+                snapshot.extractall(cwd)
+            script = cwd / 'scripts/memory.py'
+            if not script.is_file():
+                raise ValueError('基线版本缺少 scripts/memory.py')
+            # Resolve all CLI modules from that revision, not the current checkout.
+            environment['PYTHONPATH'] = str(cwd)
         rows = []
         for case in dataset['cases']:
+            if (not isinstance(case, dict) or case.get('kind') not in {'search', 'documents', 'brief', 'handoff'}
+                    or not isinstance(case.get('expected'), list)
+                    or any(not isinstance(value, str) for value in case['expected'])):
+                raise ValueError('fixture 用例必须提供有效 kind 和字符串数组 expected')
             kind = case['kind']
             if kind in {'search', 'documents'}:
                 arguments = ['search', case['query'], '--json', '--limit', '5']
@@ -75,8 +97,8 @@ def evaluate(fixture: Path = FIXTURE, *, baseline_ref: str | None = None) -> dic
                 if key in case:
                     arguments += ['--' + key, case[key]]
             start = time.perf_counter()
-            result = subprocess.run([sys.executable, str(script), '--root', str(root), *arguments], cwd=ROOT,
-                                    capture_output=True, text=True, timeout=15)
+            result = subprocess.run([sys.executable, str(script), '--root', str(root), *arguments], cwd=cwd,
+                                    capture_output=True, text=True, encoding='utf-8', timeout=15, env=environment)
             elapsed = (time.perf_counter() - start) * 1000
             ids = []
             text = result.stdout
@@ -109,7 +131,16 @@ def main():
     args = parser.parse_args()
     try:
         report = evaluate(args.fixture, baseline_ref=args.baseline_ref)
-    except (OSError, ValueError) as exc:
+    except subprocess.TimeoutExpired:
+        print('memory-eval: CLI 执行超时（15 秒）', file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError:
+        print('memory-eval: 无法读取基线版本；请检查本地 Git 引用和 scripts 目录', file=sys.stderr)
+        return 2
+    except (KeyError, TypeError):
+        print('memory-eval: fixture 缺少必要字段或字段类型无效', file=sys.stderr)
+        return 2
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f'memory-eval: {exc}', file=sys.stderr)
         return 2
     print(json.dumps(report, ensure_ascii=False, indent=2))
