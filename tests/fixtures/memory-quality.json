@@ -1,0 +1,562 @@
+{
+  "description": "Synthetic Chinese/English evidence; no real workspace memory or transcripts. Expected evidence is maintained independently of the scorer.",
+  "config": {
+    "workspace": "fixture",
+    "machine_id": "fixture-machine",
+    "search_aliases": {
+      "atlas": [
+        "starboard"
+      ]
+    }
+  },
+  "events": [
+    {
+      "event_type": "fact",
+      "title": "接口协议旧格式",
+      "content": {
+        "what": "接口协议使用CSV",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "interface-old",
+      "supersedes": []
+    },
+    {
+      "projects": [
+        {
+          "name": "atlas-core"
+        },
+        {
+          "name": "atlas-client"
+        }
+      ],
+      "event_type": "fact",
+      "title": "接口协议当前格式",
+      "content": {
+        "what": "接口协议改用JSON，跨仓库字段明确对齐",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "interface-new",
+      "supersedes": [
+        "interface-old"
+      ]
+    },
+    {
+      "event_type": "decision",
+      "title": "训练启动约定",
+      "content": {
+        "what": "训练启动必须先由用户确认",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "decision"
+    },
+    {
+      "event_type": "bugfix",
+      "title": "临时文件方案失败",
+      "content": {
+        "what": "临时文件会被并发覆盖，因此放弃该方案",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "status": "resolved",
+      "task_id": "atlas-delivery",
+      "event_id": "failed"
+    },
+    {
+      "event_type": "test_result",
+      "title": "并发回归验证",
+      "content": {
+        "what": "并发回归通过，完成来源验证",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "validation"
+    },
+    {
+      "event_type": "risk",
+      "title": "发布风险待核对",
+      "content": {
+        "what": "发布风险：服务端部署结果待核对",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "risk"
+    },
+    {
+      "event_type": "hypothesis",
+      "title": "索引性能假设",
+      "content": {
+        "what": "索引可能改善长尾延迟，尚未验证",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "status": "needs_verification",
+      "task_id": "atlas-delivery",
+      "event_id": "hypothesis"
+    },
+    {
+      "event_type": "progress",
+      "title": "交付进展",
+      "content": {
+        "what": "完成接口实现，下一步核对验证",
+        "next": [
+          "核对验证结果"
+        ],
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "progress"
+    },
+    {
+      "event_type": "fact",
+      "title": "归档项目的失败经验",
+      "content": {
+        "what": "旧任务超时原因是缓冲区不足",
+        "next": [
+          "禁止复活的旧待办"
+        ],
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "archived-task",
+      "event_id": "closed-fact"
+    },
+    {
+      "event_type": "decision",
+      "title": "用户关闭归档任务",
+      "content": {
+        "what": "已验收",
+        "task_state": "closed",
+        "where": [
+          "synthetic user acceptance"
+        ]
+      },
+      "task_id": "archived-task",
+      "event_id": "closed-state"
+    },
+    {
+      "event_type": "decision",
+      "title": "用户开始交付",
+      "content": {
+        "what": "开始验证",
+        "task_state": "active",
+        "where": [
+          "synthetic user instruction"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "active-state"
+    },
+    {
+      "event_type": "fact",
+      "topic_key": "atlas/cache",
+      "title": "Café ＡＴＬＡＳ 缓存决策",
+      "content": {
+        "what": "中文检索不依赖分词",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "atlas-delivery",
+      "event_id": "lexical"
+    },
+    {
+      "created_at": "2026-10-19T02:00:00Z",
+      "event_type": "progress",
+      "title": "接口讨论随记",
+      "content": {
+        "what": "今天顺便提到接口协议和训练启动",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "misc-task",
+      "event_id": "unrelated"
+    },
+    {
+      "projects": [
+        {
+          "name": "other"
+        }
+      ],
+      "event_type": "fact",
+      "title": "其他项目接口协议",
+      "content": {
+        "what": "其他项目独立来源",
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "other-task",
+      "event_id": "foreign"
+    },
+    {
+      "event_type": "decision",
+      "title": "并发开始",
+      "content": {
+        "what": "开始",
+        "task_state": "active",
+        "where": [
+          "synthetic user instruction"
+        ]
+      },
+      "task_id": "conflicted-task",
+      "event_id": "conflict-a"
+    },
+    {
+      "event_type": "decision",
+      "title": "并发暂停",
+      "content": {
+        "what": "暂停",
+        "task_state": "paused",
+        "where": [
+          "synthetic user instruction"
+        ]
+      },
+      "task_id": "conflicted-task",
+      "event_id": "conflict-b"
+    },
+    {
+      "event_type": "progress",
+      "title": "冲突任务进展",
+      "content": {
+        "what": "不能擅自选边",
+        "next": [
+          "冲突期间禁止推荐此步骤"
+        ],
+        "where": [
+          "synthetic fixture"
+        ]
+      },
+      "task_id": "conflicted-task",
+      "event_id": "conflict-next"
+    }
+  ],
+  "documents": {
+    ".share/knowledge/atlas.md": "# Atlas 归档\n\n跨仓库缓冲区协议在正文中说明。"
+  },
+  "cases": [
+    {
+      "name": "中文关键词",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "interface-new"
+      ],
+      "forbidden": [
+        "interface-old"
+      ],
+      "project": "atlas-core"
+    },
+    {
+      "name": "AND多词",
+      "kind": "search",
+      "query": "接口协议 JSON",
+      "expected": [
+        "interface-new"
+      ]
+    },
+    {
+      "name": "中文子串",
+      "kind": "search",
+      "query": "缓冲区",
+      "expected": [
+        "closed-fact"
+      ]
+    },
+    {
+      "name": "同义别名",
+      "kind": "search",
+      "query": "STARBOARD",
+      "expected": [
+        "lexical"
+      ],
+      "project": "atlas-core"
+    },
+    {
+      "name": "规范名称",
+      "kind": "search",
+      "query": "ＡＴＬＡＳ 缓存",
+      "expected": [
+        "lexical"
+      ]
+    },
+    {
+      "name": "大小写",
+      "kind": "search",
+      "query": "starboard",
+      "expected": [
+        "lexical"
+      ],
+      "project": "atlas-core"
+    },
+    {
+      "name": "跨仓库来源",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "interface-new"
+      ],
+      "project": "atlas-client"
+    },
+    {
+      "name": "已取代结论排除",
+      "kind": "search",
+      "query": "接口协议 CSV",
+      "expected": [],
+      "forbidden": [
+        "interface-old"
+      ]
+    },
+    {
+      "name": "显式历史查询",
+      "kind": "search",
+      "query": "接口协议 CSV",
+      "expected": [
+        "interface-old"
+      ],
+      "current": false
+    },
+    {
+      "name": "关闭任务经验",
+      "kind": "search",
+      "query": "超时原因",
+      "expected": [
+        "closed-fact"
+      ],
+      "task": "archived-task"
+    },
+    {
+      "name": "风险检索",
+      "kind": "search",
+      "query": "发布风险",
+      "expected": [
+        "risk"
+      ]
+    },
+    {
+      "name": "假设检索",
+      "kind": "search",
+      "query": "尚未验证",
+      "expected": [
+        "hypothesis"
+      ]
+    },
+    {
+      "name": "失败原因",
+      "kind": "search",
+      "query": "并发覆盖",
+      "expected": [
+        "failed"
+      ]
+    },
+    {
+      "name": "验证证据",
+      "kind": "search",
+      "query": "并发回归",
+      "expected": [
+        "validation"
+      ]
+    },
+    {
+      "name": "多词无结果",
+      "kind": "search",
+      "query": "接口协议 不存在的关键词",
+      "expected": []
+    },
+    {
+      "name": "来源项目隔离",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "foreign"
+      ],
+      "project": "other",
+      "forbidden": [
+        "interface-new"
+      ]
+    },
+    {
+      "name": "任务隔离",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "interface-new"
+      ],
+      "task": "atlas-delivery",
+      "forbidden": [
+        "foreign",
+        "unrelated"
+      ]
+    },
+    {
+      "name": "决策召回",
+      "kind": "search",
+      "query": "训练启动",
+      "expected": [
+        "decision"
+      ]
+    },
+    {
+      "name": "相关性首位",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "interface-new"
+      ],
+      "project": "atlas-core",
+      "first": "interface-new"
+    },
+    {
+      "name": "时间排序可选",
+      "kind": "search",
+      "query": "接口协议",
+      "expected": [
+        "unrelated"
+      ],
+      "project": "atlas-core",
+      "sort": "recent",
+      "first": "unrelated"
+    },
+    {
+      "name": "摘要跨类覆盖",
+      "kind": "brief",
+      "expected": [
+        "decision",
+        "validation",
+        "risk"
+      ],
+      "forbidden": [],
+      "project": "atlas-core",
+      "max_chars": 2400
+    },
+    {
+      "name": "摘要保留来源",
+      "kind": "brief",
+      "expected": [
+        "interface-new",
+        "risk"
+      ],
+      "forbidden": [
+        "interface-old"
+      ],
+      "task": "atlas-delivery",
+      "max_chars": 2400
+    },
+    {
+      "name": "关闭任务历史摘要",
+      "kind": "brief",
+      "expected": [
+        "closed-fact"
+      ],
+      "forbidden": [
+        "禁止复活的旧待办"
+      ],
+      "task": "archived-task",
+      "max_chars": 2400
+    },
+    {
+      "name": "交接失败方案",
+      "kind": "handoff",
+      "task": "atlas-delivery",
+      "expected": [
+        "临时文件会被并发覆盖",
+        "failed"
+      ],
+      "forbidden": [
+        "interface-old"
+      ]
+    },
+    {
+      "name": "交接验证证据",
+      "kind": "handoff",
+      "task": "atlas-delivery",
+      "expected": [
+        "并发回归通过",
+        "validation"
+      ],
+      "forbidden": []
+    },
+    {
+      "name": "交接未决问题",
+      "kind": "handoff",
+      "task": "atlas-delivery",
+      "expected": [
+        "发布风险",
+        "尚未验证"
+      ],
+      "forbidden": []
+    },
+    {
+      "name": "交接候选步骤",
+      "kind": "handoff",
+      "task": "atlas-delivery",
+      "expected": [
+        "核对验证结果"
+      ],
+      "forbidden": []
+    },
+    {
+      "name": "交接关闭任务",
+      "kind": "handoff",
+      "task": "archived-task",
+      "expected": [
+        "缓冲区不足"
+      ],
+      "forbidden": [
+        "禁止复活的旧待办"
+      ]
+    },
+    {
+      "name": "交接冲突任务",
+      "kind": "handoff",
+      "task": "conflicted-task",
+      "expected": [
+        "conflict"
+      ],
+      "forbidden": [
+        "冲突期间禁止推荐此步骤"
+      ]
+    },
+    {
+      "name": "文档正文与别名",
+      "kind": "documents",
+      "query": "starboard 缓冲区",
+      "expected": [
+        ".share/knowledge/atlas.md"
+      ]
+    }
+  ],
+  "defaults": {
+    "schema_version": 1,
+    "created_at": "2026-10-19T01:00:00Z",
+    "machine_id": "fixture-machine",
+    "agent": "codex",
+    "workspace": "fixture",
+    "projects": [
+      {
+        "name": "atlas-core"
+      }
+    ],
+    "topic_key": "atlas/interface",
+    "status": "active"
+  },
+  "noise_tasks": 90
+}

@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from scripts import memory
+from scripts import doctor, memory
 from tools.web.__main__ import Handler, Server
 from tools.web.data import Workspace
 
@@ -312,3 +312,130 @@ def test_monitor_scope_source_sampling_and_unavailable_are_explicit(workspace, m
     assert data['source'] == str(config)
     assert data['sampled_at'] and '--no-notify' in data['collector']
     assert workspace.monitor('b1k')['state'] == 'unconfigured'
+
+
+def test_search_matches_cli_ranking_and_explicit_time_sort(workspace):
+    events, _ = memory.load_events(workspace.root)
+    original = events[0]
+    memory.append_events(workspace.root, [original | {
+        "event_id":"best-match", "title":"shared context", "content":{"what":"durable design"},
+        "created_at":"2026-10-14T00:00:00Z"}, original | {
+        "event_id":"incidental", "title":"latest unrelated update", "content":{"what":"mentions shared context"},
+        "created_at":"2026-10-16T00:00:00Z"}])
+    args = memory.parser().parse_args(['search','shared context','--current'])
+    current, _ = memory.load_events(workspace.root)
+    assert [e['event_id'] for e in memory.select_events(current, args)] == [e['event_id'] for e in workspace.events({'q':'shared context'})['items']]
+    assert workspace.events({'q':'shared context'})['items'][0]['event_id'] == 'best-match'
+    assert workspace.events({'q':'shared context','sort':'recent'})['items'][0]['event_id'] == 'incidental'
+    with pytest.raises(ValueError):
+        workspace.events({'sort':'invalid'})
+
+
+def test_document_body_query_keeps_business_scope_and_does_not_leak_text(workspace):
+    paths = workspace.root / '.share/knowledge/projects'
+    paths.mkdir()
+    (paths / 'example.md').write_text('# Example\n\n[Included](../next.md)')
+    result = workspace.documents('example', 'Project notes')
+    assert [d['path'] for d in result] == ['.share/knowledge/next.md']
+    assert 'Project notes' in result[0]['excerpt']
+    assert 'text' not in result[0]
+    assert not workspace.documents('example', 'Backstage test')
+
+
+def test_handoff_and_doctor_routes_remain_read_only_and_show_unknowns(server, workspace):
+    before = {str(p):p.read_bytes() for p in workspace.root.rglob('*') if p.is_file()}
+    handoff = fetch(server, '/api/handoff?task=example-task')
+    assert handoff['state'] == 'active'
+    assert handoff['sections']['事实与依据']
+    assert handoff['repositories'][0]['commit'] is None
+    assert fetch(server, '/api/doctor')['scope'] == 'local'
+    assert before == {str(p):p.read_bytes() for p in workspace.root.rglob('*') if p.is_file()}
+    for path in ('/api/handoff?task=missing', '/api/handoff'):
+        with pytest.raises(HTTPError) as exc:
+            urlopen(server + path)
+        assert exc.value.code in {400,404}
+
+
+def test_handoff_missing_git_is_unavailable_instead_of_missing_task(server, workspace, monkeypatch):
+    (workspace.root.parent / 'example').mkdir()
+    def missing_git(*args, **kwargs):
+        raise FileNotFoundError('git')
+    monkeypatch.setattr(subprocess, 'run', missing_git)
+    result = fetch(server, '/api/handoff?task=example-task')
+    assert result['state'] == 'active'
+    repo = result['repositories'][0]
+    assert repo['available'] is False
+    assert repo['commit'] is repo['branch'] is repo['dirty'] is None
+
+
+def test_doctor_http_uses_selected_local_root_for_conflict_and_baseline(server, workspace, tmp_path, monkeypatch):
+    config_path = workspace.root / 'config.json'
+    config = json.loads(config_path.read_text())
+    config['sync'] = {'enabled':True, 'initialized':True, 'remote':'alias/bucket/workspace'}
+    config_path.write_text(json.dumps(config))
+    (workspace.root / '.local/.sync/base').mkdir(parents=True)
+    workspace.local = tmp_path / 'alternate-local'
+    conflict = workspace.local / '.sync/conflict'
+    conflict.mkdir(parents=True)
+    monkeypatch.setattr(doctor.shutil, 'which', lambda _: '/synthetic/mc')
+    result = fetch(server, '/api/doctor')
+    assert result['local_root'] == str(workspace.local)
+    check = next(c for c in result['checks'] if c['name'] == '同步')
+    assert check['state'] == 'warning'
+    assert '冲突' in check['detail'] and '缺少 shared 基线' in check['detail']
+    conflict.rmdir()
+    (workspace.local / '.sync/base').mkdir()
+    (workspace.root / '.local/.sync/conflict').mkdir()
+    result = fetch(server, '/api/doctor')
+    assert next(c for c in result['checks'] if c['name'] == '同步')['state'] == 'ok'
+
+
+def test_document_http_unicode_excerpt_keeps_query_and_hides_full_text(server, workspace):
+    path = workspace.root / 'docs'
+    path.mkdir()
+    (path / 'unicode.md').write_text('# Unicode\n\n' + 'ﬁ' * 100 + ' target evidence')
+    result = fetch(server, '/api/documents?q=target')['items']
+    assert len(result) == 1
+    assert 'target evidence' in result[0]['excerpt']
+    assert 'text' not in result[0]
+
+
+@pytest.mark.parametrize('updates', [
+    {'workspace_root':''}, {'workspace_root':' '},
+    {'projects':{'example':'not-an-object'}}, {'projects':{'example':{}}},
+    {'projects':{'example':{'path':None}}}, {'projects':{'example':{'path':' '}}},
+    *({'search_aliases':aliases} for aliases in ([], {'a':'b'}, {'a':['']}, {'':['b']})),
+])
+def test_invalid_config_is_reported_by_doctor_and_rejected_by_web(server, workspace, updates):
+    path = workspace.root / 'config.json'
+    path.write_text(json.dumps(json.loads(path.read_text()) | updates))
+    report = fetch(server, '/api/doctor')
+    assert report['state'] == 'error'
+    assert report['checks'][0]['state'] == 'error'
+    with pytest.raises(HTTPError) as exc:
+        urlopen(server + '/api/overview')
+    assert exc.value.code == 400
+
+
+@pytest.mark.parametrize('updates', [{'projects':{'example':{}}}, {'search_aliases':[]}])
+def test_web_startup_invalid_config_returns_clean_error(workspace, updates):
+    import sys
+    path = workspace.root / 'config.json'
+    path.write_text(json.dumps(json.loads(path.read_text()) | updates))
+    result = subprocess.run([sys.executable, '-m', 'tools.web', '--root', str(workspace.root), '--port', '0'],
+                            capture_output=True, text=True, encoding='utf-8', timeout=10)
+    assert result.returncode == 2
+    assert ('path' in result.stderr or 'search_aliases' in result.stderr) and 'memory doctor' in result.stderr
+    assert 'Traceback' not in result.stderr
+
+
+def test_web_can_browse_offline_workspace_while_doctor_reports_local_path_unavailable(server, workspace):
+    offline = workspace.root.parent / 'offline-workspace'
+    offline.write_text('not a local checkout directory')
+    config = workspace.root / 'config.json'
+    config.write_text(json.dumps(json.loads(config.read_text()) | {'workspace_root':str(offline)}))
+    assert fetch(server, '/api/overview')['counts']['events'] == 3
+    report = fetch(server, '/api/doctor')
+    assert report['checks'][0]['state'] == 'error'
+    handoff = fetch(server, '/api/handoff?task=example-task')
+    assert handoff['repositories'][0]['available'] is False

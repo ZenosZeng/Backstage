@@ -65,9 +65,13 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/event":
                 data = workspace.event(query["id"])
             elif url.path == "/api/documents":
-                data = {"items": workspace.documents(query.get("business"))}
+                data = {"items": workspace.documents(query.get("business"), query.get("q", ""), query.get("sort", "relevance"))}
             elif url.path == "/api/document":
                 data = workspace.document(query["path"])
+            elif url.path == "/api/handoff":
+                data = workspace.handoff(query["task"], query.get("limit", 5))
+            elif url.path == "/api/doctor":
+                data = workspace.doctor()
             elif url.path == "/api/services":
                 data = workspace.services()
             elif url.path == "/api/monitor":
@@ -107,7 +111,10 @@ def main():
     parser.add_argument("--local-root", type=Path)
     args = parser.parse_args()
     workspace = Workspace(args.root, args.local_root or (local_root() if args.root == ROOT else args.root / ".local"))
-    memory_config = workspace.snapshot()["config"]
+    try:
+        memory_config = workspace.snapshot()["config"]
+    except (OSError, ValueError) as error:
+        parser.error(f"无法读取工作区：{error}；运行 memory doctor 检查配置和数据。")
     with Server(("127.0.0.1", args.port), workspace) as server:
         print(f"Backstage · {memory_config['workspace']} · http://127.0.0.1:{server.server_port}", flush=True)
         try:

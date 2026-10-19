@@ -4,7 +4,7 @@
 Linux 生产环境，本补丁只在 Windows 机器上按需应用，避免影响正在运行的服务。
 
 - 补丁文件：`windows-portability.patch`，对应 **v0.6.1** 级别的修复内容（小版本，只修 bug）
-- 基线：`main` @ v0.6.0
+- 当前应用上下文：**v0.7.0**；沿用 v0.6.1 修复，并补充新版 doctor 的文件副本识别，仍只保留在补丁文件中。
 
 ## 使用方法
 
@@ -21,7 +21,7 @@ git apply --reverse patches/windows-portability.patch
 ```
 
 补丁以**未提交的工作区改动**形式存在，不要 commit。注意 `git pull` / `git merge`
-在upstream 触及这 5 个文件时会因工作区不干净而失败：先反向回退，拉取后重新应用。
+在upstream 触及这 6 个文件时会因工作区不干净而失败：先反向回退，拉取后重新应用。
 
 ## 补丁内容
 
@@ -52,11 +52,20 @@ Windows 上刚写完的文件或目录可能被杀毒或索引进程瞬时持有
 符号链接与 junction/副本按平台分别断言，Windows 分支比对内容而非链接目标；Linux
 分支保留原有断言不变。
 
+**6. 自检中的文件副本**（`scripts/doctor.py`）
+Windows 无符号链接权限时，入口 Prompt 使用普通文件副本；自检按内容一致识别该副本，
+内容不同或指向其他来源的符号链接仍报警。Linux 继续要求预期链接来源一致。
+
 ## 验证情况
+
+- v0.7.0：更新 Git 状态读取处的补丁上下文，Linux 上验证应用/反向回退及源码字节还原。
+  新增 Linux 上执行实际 doctor 补丁的模拟回归：匹配副本、过期副本、无关符号链接及
+  Linux 原有规则；此验证不代替 Windows 实机运行。
+  新版尚未在 Windows 实机运行；下述 Windows 回归数字只对应 v0.6.1，不代表新增功能已验证。
 
 - 应用后 `tests/` 全量 **86 项在 Windows 上连续 3 轮通过**；修复 `os.replace` 之前，
   仅 `test_sync` 一项 6 轮里就有 5 轮失败，且每轮失败的用例都不同。
-- **Linux 未实测**。对 Linux 无行为影响的结论来自代码审查：所有 Windows 分支均由
+- **v0.6.1 原记录：Linux 未实测**。对 Linux 无行为影响的结论来自代码审查：所有 Windows 分支均由
   `os.name` 或 `ImportError` 守卫，测试的 `else` 分支保留原有断言。若要上游，建议先
   在 Linux CI 上跑一遍。
 - `tools/tests/` **未覆盖**：本机缺 `lark_oapi`、`pytest` 依赖，且部分用例依赖 Linux

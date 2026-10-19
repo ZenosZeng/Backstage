@@ -20,7 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-import memory as memory_store
+try:
+    from scripts import memory as memory_store
+except ModuleNotFoundError:
+    import memory as memory_store
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -924,7 +927,9 @@ def ensure_link(
     path.symlink_to(target, target_is_directory=target.is_dir())
 
 
-def configure_agent_links(root: Path, config: dict[str, Any], *, dry_run: bool, strict: bool = True) -> None:
+def agent_links(root: Path, config: dict[str, Any], *, home: Path | None = None) -> list[tuple[Path, Path]]:
+    """Describe managed links for both installation and read-only diagnostics."""
+    home = home or Path.home()
     skills_root = root / ".share" / "agent" / "skills"
     # 2026-08-12 skills 按 common/eval/memory/train 分类后为多级布局：
     # 递归发现所有含 SKILL.md 的目录（父目录即 skill 名），跳过分类目录本身。
@@ -947,11 +952,15 @@ def configure_agent_links(root: Path, config: dict[str, Any], *, dry_run: bool, 
     links: list[tuple[Path, Path]] = []
     for skill in skills:
         for agent_home in (".codex", ".claude", ".kimi-code"):
-            links.append((Path.home() / agent_home / "skills" / skill.name, skill))
+            links.append((home / agent_home / "skills" / skill.name, skill))
     workspace = Path(os.path.expanduser(str(config["workspace_root"])))
     links.append((workspace / "AGENTS.md", root / ".share" / "agent" / "prompts" / "AGENTS.md"))
     links.append((workspace / "CLAUDE.md", root / ".share" / "agent" / "prompts" / "CLAUDE.md"))
-    for path, target in links:
+    return links
+
+
+def configure_agent_links(root: Path, config: dict[str, Any], *, dry_run: bool, strict: bool = True) -> None:
+    for path, target in agent_links(root, config):
         try:
             ensure_link(path, target, dry_run=dry_run, managed_root=root / ".share")
         except SyncError as error:
