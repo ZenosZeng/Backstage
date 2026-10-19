@@ -18,7 +18,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
-from scripts import memory
+from scripts import memory, retrieval
 from tools import service
 from tools.config import ROOT
 
@@ -204,10 +204,14 @@ class Workspace:
         args = Namespace(
             query=query.get("q", ""), project=query.get("project"), task=query.get("task"),
             machine=query.get("machine"), agent=query.get("agent"), topic=None,
-            current=query.get("current", "true") == "true", limit=None, sort="recent",
+            current=query.get("current", "true") == "true", limit=None,
+            sort=query.get("sort") or ("relevance" if query.get("q") else "recent"),
+            aliases=snap["config"].get("search_aliases", {}),
             since=memory.filter_time(query["since"]) if query.get("since") else None,
             until=memory.filter_time(query["until"]) if query.get("until") else None,
         )
+        if args.sort not in {"relevance", "recent"}:
+            raise ValueError("未知排序")
         selected = memory.select_events(events, args)
         if query.get("business"):
             selected = [e for e in selected if query["business"] in snap["membership"].get(e["event_id"], [])]
@@ -230,55 +234,31 @@ class Workspace:
                         "errors": errors}
         raise FileNotFoundError("记忆不存在")
 
-    @property
-    def document_roots(self):
-        return [self.root / name for name in (".share/knowledge", ".share/docs", "docs", "tools", "examples")]
+    def handoff(self, task, limit=5):
+        snap = self.snapshot()
+        result = memory.handoff(self.root, snap["events"], task, limit=min(20, max(1, int(limit))),
+                                sources=snap["sources"])
+        return result | {"errors": snap["errors"]}
+
+    def doctor(self):
+        from scripts.doctor import inspect_workspace
+        return inspect_workspace(self.root, local=self.local)
 
     def document_path(self, value: str) -> Path:
-        path = (self.root / value).resolve()
-        allowed = any(path.is_relative_to(base.resolve()) for base in self.document_roots)
-        allowed = allowed or path == self.root / "README.md"
-        if not allowed or path.suffix.lower() not in {".md", ".svg", ".png", ".jpg", ".jpeg", ".webp"}:
-            raise PermissionError("只能读取文档目录中的 Markdown 和图片")
-        if not path.is_file():
-            raise FileNotFoundError("文档不存在")
-        return path
+        return retrieval.document_path(self.root, value)
 
-    def documents(self, business=None):
+    def documents(self, business=None, query='', sort='relevance'):
         snap = self.snapshot()
+        documents = snap["documents"]
         if business:
             project = snap["projects"].get(business)
             if project is None:
                 raise FileNotFoundError("业务项目不存在")
-            return [d for d in snap["documents"] if d["path"] in project["documents"]]
-        return snap["documents"]
+            documents = [d for d in documents if d["path"] in project["documents"]]
+        return retrieval.search_documents(documents, query, aliases=snap["config"].get("search_aliases", {}), sort=sort)
 
     def _scan_documents(self):
-        paths = [self.root / "README.md"]
-        for base in self.document_roots:
-            if base.is_dir():
-                paths.extend(base.rglob("*.md"))
-                paths.extend(base.rglob("*.svg"))
-        result = []
-        for candidate in sorted(set(paths)):
-            if not candidate.is_file():
-                continue
-            relative = candidate.relative_to(self.root).as_posix()
-            try:
-                self.document_path(relative)
-            except (PermissionError, FileNotFoundError):
-                continue
-            title = candidate.stem
-            if candidate.suffix == ".md":
-                with candidate.open(encoding="utf-8", errors="replace") as stream:
-                    for _ in range(20):
-                        line = stream.readline()
-                        if line.startswith("# "):
-                            title = line[2:].strip()
-                            break
-            result.append({"path": relative, "title": title, "kind": candidate.suffix[1:],
-                           "updated_at": timestamp(candidate.stat().st_mtime)})
-        return result
+        return retrieval.scan_documents(self.root)
 
     def document(self, value: str):
         path = self.document_path(value)

@@ -13,14 +13,16 @@
 
 ## 当前版本
 
-最新版本：**v0.6.1** · 当前功能版本：**v0.6.0**。
+最新版本：**v0.7.0** · 当前功能版本：**v0.7.0**。
 
-**v0.6.0 主要功能**
+**v0.7.0 主要功能**
 
-- 只读 Web 工作台：项目导航、跨仓记忆与文档预览、本机服务和监控快照。
-- 深浅主题、手机布局与共享短时快照缓存。
+- 摘要按类别分配内容预算，保留完整来源，避免大量任务挤掉事实和风险。
+- 网页与 CLI 共用相关性排序、可配置别名；文档支持 Markdown 正文搜索。
+- 只读任务交接与本机自检，复用原始记忆和任务生命周期。
+- 固定中文/英文质量样例，可对比旧版本的检索命中和摘要保留效果。
 
-`v0.6.1` 提供按需应用的 [Windows 兼容补丁](patches/README.md)，不改变 Linux 生产实现。完整变化见 [版本记录](docs/changelog.md)，补丁不替换功能摘要。
+沿用 v0.6.0 的只读工作台、深浅主题、手机布局与短时快照。升级与兼容说明见 [版本记录](docs/changelog.md)。
 
 ## 快速开始
 
@@ -39,6 +41,9 @@ pixi install --locked
 ```bash
 pixi run memory brief --project repo-name
 pixi run memory search "接口 契约" --current --limit 10
+pixi run memory handoff --task task-id
+pixi run memory doctor
+pixi run memory-eval
 pixi run tools-status
 pixi run web
 ```

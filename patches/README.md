@@ -4,7 +4,7 @@
 Linux 生产环境，本补丁只在 Windows 机器上按需应用，避免影响正在运行的服务。
 
 - 补丁文件：`windows-portability.patch`，对应 **v0.6.1** 级别的修复内容（小版本，只修 bug）
-- 基线：`main` @ v0.6.0
+- 当前应用上下文：**v0.7.0**；Windows 修复内容沿用 v0.6.1，仍只保留在补丁文件中。
 
 ## 使用方法
 
@@ -54,9 +54,12 @@ Windows 上刚写完的文件或目录可能被杀毒或索引进程瞬时持有
 
 ## 验证情况
 
+- v0.7.0：更新 Git 状态读取处的补丁上下文，Linux 上验证应用/反向回退及源码字节还原。
+  新版尚未在 Windows 实机运行；下述 Windows 回归数字只对应 v0.6.1，不代表新增功能已验证。
+
 - 应用后 `tests/` 全量 **86 项在 Windows 上连续 3 轮通过**；修复 `os.replace` 之前，
   仅 `test_sync` 一项 6 轮里就有 5 轮失败，且每轮失败的用例都不同。
-- **Linux 未实测**。对 Linux 无行为影响的结论来自代码审查：所有 Windows 分支均由
+- **v0.6.1 原记录：Linux 未实测**。对 Linux 无行为影响的结论来自代码审查：所有 Windows 分支均由
   `os.name` 或 `ImportError` 守卫，测试的 `else` 分支保留原有断言。若要上游，建议先
   在 Linux CI 上跑一遍。
 - `tools/tests/` **未覆盖**：本机缺 `lark_oapi`、`pytest` 依赖，且部分用例依赖 Linux

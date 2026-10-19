@@ -132,3 +132,17 @@ nav a{font-size:14px}.workspace-switch strong{font-size:14px}.workspace-switch d
 @media(max-width:900px){nav a{font-size:0}.filter-row{gap:13px}.page-heading{flex-wrap:wrap}.document-layout{grid-template-columns:230px minmax(0,1fr)}}
 @media(max-width:650px){h1{font-size:25px}.page-heading p{font-size:13px}.page-heading .button{font-size:12px}.project-card h3{font-size:17px}.project-card>p{font-size:13px}.project-card-foot{flex-wrap:wrap;font-size:12px}.event-row,.event-row.compact{padding:17px 13px;gap:10px}.event-main>strong,.event-row.compact .event-main>strong{font-size:14px}.event-meta,.compact .event-meta{font-size:11px}.event-top time{font-size:11px}.event-excerpt{font-size:13px}.event-top{flex-wrap:wrap}.filter-select>span,.filter-select select,.history-filter{font-size:12px}.filter-select select{width:76%;max-width:none}.memory-search input,.memory-search .button{font-size:13px}.memory-search .button{padding:8px 10px}.result-count{font-size:12px}.document-layout{grid-template-columns:1fr}.prose{font-size:14px;padding:20px}.document-toolbar{font-size:11px}.document-toolbar>time{font-size:11px}.drawer h2{font-size:21px}.section-heading .muted{font-size:11px}footer{font-size:11px}.stat-label{font-size:12px}.stat-card>span{font-size:11px}.compact-stats .stat-card{padding:15px}.compact-stats .stat-card>strong{font-size:24px}.project-summary{font-size:13px;gap:12px}.page-heading{gap:16px}.document-projects .project-card-foot{gap:8px}.repository-links{gap:8px}}
 .table-scroll{max-width:100%;overflow-x:auto;margin:18px 0;border-radius:4px}.prose .table-scroll table{display:table;min-width:640px;width:100%;margin:0}.prose .table-scroll td,.prose .table-scroll th{min-width:90px}
+
+/* Read-only handoff and diagnostics share existing panel and semantic colors. */
+.handoff-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin:20px 0}
+.handoff-record{display:block;width:100%;text-align:left;background:none;color:inherit;border:0;border-top:1px solid var(--line);padding:18px 22px;cursor:pointer;overflow-wrap:anywhere}
+.handoff-record p{font-size:13px;line-height:1.7;white-space:pre-wrap;margin:8px 0}
+.handoff-record small,.handoff-record code{display:block;font-size:11px;line-height:1.7;color:var(--muted);overflow-wrap:anywhere}
+.handoff-record:hover{background:var(--surface-2)}
+.handoff-state .reference-link{display:block;margin:12px 22px}
+.handoff-repository{display:flex;flex-wrap:wrap;gap:12px;padding:16px 22px;border-top:1px solid var(--line);font-size:13px}
+.handoff-repository code{overflow-wrap:anywhere;min-width:0}
+.doctor-panel{margin-top:24px}.doctor-panel .panel-hint{overflow-wrap:anywhere}.doctor-check{display:flex;align-items:flex-start;gap:14px;padding:16px 22px;border-top:1px solid var(--line)}
+.doctor-check>div{min-width:0;overflow-wrap:anywhere}.doctor-check strong{font-size:13px}.doctor-check p{font-size:13px;line-height:1.7;margin:6px 0}.doctor-check small{font-size:12px;line-height:1.7;color:var(--muted)}
+.document-excerpt{white-space:normal!important;line-height:1.6!important;font-size:12px!important}.search-documents{margin-bottom:16px}
+@media(max-width:760px){.handoff-grid{grid-template-columns:minmax(0,1fr)}.handoff-record,.doctor-check{padding:16px}.handoff-repository{display:block}.handoff-repository>*{display:block;margin:6px 0}}

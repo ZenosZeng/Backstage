@@ -65,9 +65,13 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/event":
                 data = workspace.event(query["id"])
             elif url.path == "/api/documents":
-                data = {"items": workspace.documents(query.get("business"))}
+                data = {"items": workspace.documents(query.get("business"), query.get("q", ""), query.get("sort", "relevance"))}
             elif url.path == "/api/document":
                 data = workspace.document(query["path"])
+            elif url.path == "/api/handoff":
+                data = workspace.handoff(query["task"], query.get("limit", 5))
+            elif url.path == "/api/doctor":
+                data = workspace.doctor()
             elif url.path == "/api/services":
                 data = workspace.services()
             elif url.path == "/api/monitor":

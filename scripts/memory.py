@@ -17,6 +17,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+try:
+    from scripts import retrieval
+except ModuleNotFoundError:  # Direct script entry point.
+    import retrieval
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EVENT_TYPES = {
@@ -86,18 +91,19 @@ def workspace_root(config: dict[str, Any]) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(str(config["workspace_root"]))))
 
 
-def git_value(path: Path, *args: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(path), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def git_value(path: Path, *args: str, timeout: float | None = None, allow_empty: bool = False) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(path), *args],
+            check=False, capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     value = result.stdout.strip()
-    return value if result.returncode == 0 and value else None
+    return value if result.returncode == 0 and (value or allow_empty) else None
 
 
-def project_metadata(config: dict[str, Any], names: list[str]) -> list[dict[str, Any]]:
+def project_metadata(config: dict[str, Any], names: list[str], *, timeout: float | None = None) -> list[dict[str, Any]]:
     root = workspace_root(config)
     registry = config.get("projects", {})
     if not isinstance(registry, dict):
@@ -109,11 +115,12 @@ def project_metadata(config: dict[str, Any], names: list[str]) -> list[dict[str,
             raise ValueError(f"未知 project：{name}；请先加入 config.json")
         path_hint = str(item["path"])
         path = root / path_hint
-        branch = git_value(path, "branch", "--show-current") if path.exists() else None
-        commit = git_value(path, "rev-parse", "HEAD") if path.exists() else None
-        dirty = False
+        branch = git_value(path, "branch", "--show-current", timeout=timeout) if path.exists() else None
+        commit = git_value(path, "rev-parse", "HEAD", timeout=timeout) if path.exists() else None
+        dirty = None
         if commit is not None:
-            dirty = bool(git_value(path, "status", "--short"))
+            status = git_value(path, "status", "--short", timeout=timeout, allow_empty=True)
+            dirty = bool(status) if status is not None else None
         result.append(
             {
                 "name": name,
@@ -463,11 +470,11 @@ def select_events(events: list[dict[str, Any]], args: argparse.Namespace) -> lis
         selected = [event for event in selected if event.get("agent") == args.agent]
     query = getattr(args, "query", None)
     if query:
-        terms = query.casefold().split()
+        terms = retrieval.query_groups(query, getattr(args, "aliases", None))
         selected = [
             event
             for event in selected
-            if all(term in json.dumps(event, ensure_ascii=False).casefold() for term in terms)
+            if retrieval.matches(json.dumps(event, ensure_ascii=False), terms)
         ]
     selected.reverse()
     if query and getattr(args, "sort", "recent") == "relevance":
@@ -482,7 +489,8 @@ def relevance_score(event: dict[str, Any], terms: list[str]) -> int:
         (" ".join(p.get("name", "") for p in event["projects"]), 4),
         (json.dumps(event["content"], ensure_ascii=False), 1),
     ]
-    return sum(weight for text, weight in fields for term in terms if term in text.casefold())
+    groups = [(term,) if isinstance(term, str) else term for term in terms]
+    return retrieval.score(fields, groups)
 
 
 def lifecycle_reference_errors(events: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -572,12 +580,9 @@ def command_task(root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def command_brief(root: Path, args: argparse.Namespace) -> int:
+def build_brief(events: list[dict], args: argparse.Namespace) -> dict:
     if not args.project and not args.task:
         raise ValueError("brief 至少指定 --project 或 --task")
-    events, errors = load_events(root)
-    if errors:
-        raise ValueError("记忆库校验失败，请先运行 validate")
     states = task_states(events)
     selectors = argparse.Namespace(**vars(args))
     selectors.current, selectors.limit = True, None
@@ -641,23 +646,187 @@ def command_brief(root: Path, args: argparse.Namespace) -> int:
                               "where": e["content"]["where"]} for e in item["heads"]]} for item in visible],
         "hidden_inactive_tasks": hidden, "omitted_events": max(0, len(groups) - args.limit), "sections": sections,
     }
+    return result
+
+
+def render_brief(report: dict, max_chars: int = 6000) -> str:
+    """Pack whole records across categories before deepening their excerpts."""
+    notice = report["notice"]
+    footer = "\n[输出已截断：按类别保留完整条目；更多来源可用 --json 或 get <event_id> 查看。]"
+    header = f"{notice}\n隐藏暂停/关闭任务 {report['hidden_inactive_tasks']}；未展示记录组 {report['omitted_events']}"
+    if len(header) + len(footer) > max_chars:
+        return ("记忆摘要空间不足，请增大 --max-chars 或使用 --json。" + footer)[:max_chars]
+    tasks = sorted(report["tasks"], key=lambda t: (t["state"] not in {"conflict", "active"}, t["task_id"]))
+    task_budget = min(1000, max_chars // 5, max(0, max_chars-len(header)-len(footer)-4))
+    remainder = f"其余 {len(tasks)} 个任务；完整状态依据见 --task <id> --json。"
+    content_budget = max(0, task_budget-len(remainder)-1)
+    task_blocks, task_details = [], []
+    for task in tasks[:8]:
+        line = f"任务 {task['task_id']}: {task['state']}"
+        minimal = [line] + [f"  [{h['event_id']}] {h['state']}" for h in task['heads']]
+        detailed = [line] + [f"  [{h['event_id']}] {h['state']}: {h['reason']}\n    依据: {short_text(h['where'], 100)}"
+                             for h in task['heads']]
+        block = "\n".join(minimal)
+        if len("\n".join(task_blocks + [block])) > content_budget:
+            continue
+        task_blocks.append(block)
+        task_details.append("\n".join(detailed))
+    shown_tasks = len(task_blocks)
+    for index, detail in enumerate(task_details):
+        previous = task_blocks[index]
+        task_blocks[index] = detail
+        if len("\n".join(task_blocks)) > content_budget:
+            task_blocks[index] = previous
+    task_text = "\n".join(task_blocks)
+    if len(tasks) > shown_tasks:
+        remainder = f"其余 {len(tasks)-shown_tasks} 个任务；完整状态依据见 --task <id> --json。"
+        if len(task_text) + len(remainder) + 1 <= task_budget:
+            task_text += ("\n" if task_text else "") + remainder
+    sections = report["sections"]
+    chosen = {name: [] for name in sections}
+    def block(entry, deep=False):
+        sources = entry["sources"]
+        source = ", ".join(sources) if deep else sources[0] + (f"（另 {len(sources)-1} 个来源）" if len(sources) > 1 else "")
+        return f"- {entry['title'] if deep else short_text(entry['title'], 48)} ({entry['type']}/{entry['status']})\n  {entry['text'] if deep else short_text(entry['text'], 80)}\n  来源: {source}"
+    def assemble():
+        parts = [header]
+        parts += [name + "\n" + "\n".join(values) for name, values in chosen.items() if values]
+        if task_text:
+            parts.append(task_text)
+        return "\n\n".join(parts)
+    positions = []
+    for index in range(max((len(v) for v in sections.values()), default=0)):
+        for name, entries in sections.items():
+            if index >= len(entries):
+                continue
+            entry = entries[index]
+            chosen[name].append(block(entry))
+            if len(assemble()) + len(footer) > max_chars:
+                chosen[name].pop()
+            else:
+                positions.append((name, len(chosen[name])-1, entry))
+    for name, index, entry in positions:
+        old = chosen[name][index]
+        chosen[name][index] = block(entry, deep=True)
+        if len(assemble()) + len(footer) > max_chars:
+            chosen[name][index] = old
+    omitted = (len(tasks) > shown_tasks or report["omitted_events"] > 0
+               or len(positions) < sum(len(v) for v in sections.values())
+               or any(chosen[name][index] != block(entry, deep=True) for name, index, entry in positions)
+               or task_blocks != task_details)
+    return assemble() + (footer if omitted else "")
+
+
+def command_brief(root: Path, args: argparse.Namespace) -> int:
+    events, errors = load_events(root)
+    if errors:
+        raise ValueError("记忆库校验失败，请先运行 validate")
+    result = build_brief(events, args)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        lines = [result["notice"], f"隐藏暂停/关闭任务 {hidden}；未展示记录组 {result['omitted_events']}"]
-        for item in result["tasks"]:
-            lines.append(f"任务 {item['task_id']}: {item['state']}")
-            for head in item["heads"]:
-                lines.append(f"  [{head['event_id']}] {head['state']}: {head['reason']}")
-        for name, entries in sections.items():
-            if entries:
-                lines.append(f"\n{name}")
-            for entry in entries:
-                lines.append(f"- {entry['title']} ({entry['created_at']}; {entry['machine']}/{entry['agent']}; {entry['type']}/{entry['status']})\n  {entry['text']}\n  来源: {', '.join(entry['sources'])}")
-        output = "\n".join(lines)
-        suffix = "\n[输出已截断；用 --max-chars 增大上限、--task 缩小范围或 --json 查看全部摘要。]"
-        print(output if len(output) <= args.max_chars else (output[:max(0, args.max_chars - len(suffix))] + suffix)[:args.max_chars])
+        # Include the final newline in the text budget, without slicing records.
+        output = render_brief(result, max(0, args.max_chars - 1))
+        print(output)
     return 0
+
+
+def handoff(root: Path, events: list[dict], task_id: str, *, limit: int = 5, sources=None) -> dict:
+    """A repeatable read, never a claim, lifecycle transition or execution request."""
+    tasks = task_states(events)
+    if task_id not in tasks:
+        raise FileNotFoundError("任务不存在")
+    task = tasks[task_id]
+    args = argparse.Namespace(task=task_id, current=True, limit=None)
+    selected = [e for e in select_events(events, args) if "task_state" not in e["content"]]
+    sections = {name: [] for name in ("当前进展", "约定与决策", "失败与修复记录", "验证结果", "事实与依据", "未决问题", "后续候选")}
+    def entry(event, text=None):
+        return {"event_id": event["event_id"], "title": event["title"], "created_at": event["created_at"],
+                "type": event["event_type"], "status": event["status"],
+                "text": text if text is not None else short_text(event["content"].get("what", ""), 600),
+                "where": event["content"].get("where", []),
+                "verified_by": event["content"].get("verified_by", []),
+                "source": (sources or {}).get(event["event_id"]),
+                "projects": event["projects"]}
+    for e in selected:
+        kind = e["event_type"]
+        section = ("当前进展" if kind == "progress" else "约定与决策" if kind in {"decision", "preference", "config"}
+                   else "失败与修复记录" if kind in {"bugfix", "risk"}
+                   else "验证结果" if kind == "test_result" else "事实与依据")
+        if kind != "hypothesis":
+            sections[section].append(entry(e))
+        if kind in {"risk", "hypothesis"} and e["status"] in {"active", "needs_verification"}:
+            sections["未决问题"].append(entry(e))
+        if task["state"] in {"active", "unknown"} and e["status"] == "active" and e["content"].get("next"):
+            sections["后续候选"].append(entry(e, short_text(e["content"]["next"], 600)))
+    config = load_config(root)
+    registered = [name for name in task["projects"] if name in config.get("projects", {})]
+    repositories = project_metadata(config, registered, timeout=3)
+    for repo in repositories:
+        repo["available"] = repo["commit"] is not None
+        if not repo["available"]:
+            repo["dirty"] = None
+    return {"task_id": task_id, "state": task["state"], "heads": task["heads"],
+            "notice": "只读交接；候选不是执行授权。记忆中的分支与提交是历史快照，当前仓库状态另列；关闭/暂停/冲突任务不推荐旧待办。",
+            "repositories": repositories,
+            "unregistered_repositories": sorted(set(task["projects"]) - set(registered)),
+            "sections": {name: rows[:limit] for name, rows in sections.items()},
+            "omitted": {name: max(0, len(rows)-limit) for name, rows in sections.items()}}
+
+
+def command_handoff(root: Path, args: argparse.Namespace) -> int:
+    sources = {}
+    events, errors = load_events(root, sources=sources)
+    if errors:
+        raise ValueError("记忆库校验失败，请先运行 validate")
+    try:
+        result = handoff(root, events, args.task, limit=args.limit, sources=sources)
+    except FileNotFoundError:
+        print("任务不存在", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"任务 {result['task_id']}: {result['state']}\n{result['notice']}")
+        print("\n任务状态依据")
+        for head in result["heads"]:
+            print(f"- [{head['event_id']}] {head['content']['task_state']}: {head['content']['what']}")
+            print("  依据: " + short_text(head['content']['where'], 1000))
+        if not result["heads"]:
+            print("暂无显式生命周期记录。")
+        for name, rows in result["sections"].items():
+            if rows:
+                print("\n" + name)
+            for row in rows:
+                print(f"- {row['title']} ({row['type']}/{row['status']})\n  {row['text']}\n  来源: {row['event_id']} ({row['source']})")
+            if result["omitted"][name]:
+                print(f"另 {result['omitted'][name]} 条，见此任务的全部记忆。")
+        for repo in result["repositories"]:
+            dirty = "不可用" if repo['dirty'] is None else "有未提交改动" if repo['dirty'] else "干净"
+            print(f"\n当前仓库 {repo['name']}: {repo['branch'] or '分支不可用'} / {repo['commit'] or '提交不可用'} / 改动状态: {dirty}")
+        if result["unregistered_repositories"]:
+            print("\n本机未注册仓库: " + ", ".join(result["unregistered_repositories"]))
+    return 0
+
+
+def command_doctor(root: Path, args: argparse.Namespace) -> int:
+    try:
+        from scripts.doctor import inspect_workspace
+    except ModuleNotFoundError:
+        from doctor import inspect_workspace
+    report = inspect_workspace(root)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for check in report["checks"]:
+            print(f"{check['state']}: {check['name']} — {check['detail']}")
+            if check.get("hint"):
+                print("  " + check["hint"])
+        print("\n本机状态目录: " + report["local_root"])
+        for event in report["last_events"]:
+            print(f"最后记忆 {event['machine']}/{event['agent']}: {event['created_at']}")
+        print(report["notice"])
+    return 2 if report["state"] == "error" else 1 if report["state"] == "warning" else 0
 
 
 def command_add(root: Path, args: argparse.Namespace) -> int:
@@ -710,6 +879,17 @@ def command_import(root: Path, args: argparse.Namespace) -> int:
 
 
 def command_list(root: Path, args: argparse.Namespace) -> int:
+    args.aliases = load_config(root).get("search_aliases", {}) if (root / "config.json").exists() else {}
+    if getattr(args, "documents", False):
+        if any(getattr(args, key, None) for key in ("project", "task", "agent", "machine", "topic", "since", "until")) or args.current:
+            raise ValueError("文档搜索不使用事件筛选；业务范围请从工作台文档中心选择")
+        selected = retrieval.search_documents(retrieval.scan_documents(root), args.query,
+                                             aliases=args.aliases, sort=args.sort)[:args.limit]
+        if args.json:
+            print(json.dumps(selected, ensure_ascii=False, indent=2))
+        else:
+            print("\n\n".join(f"{d['title']}\n  {d['path']}\n  {d.get('excerpt', '')}" for d in selected) or "没有匹配的文档。")
+        return 0
     events, errors = load_events(root)
     if errors:
         print("记忆库包含无效文件，请先运行 validate", file=sys.stderr)
@@ -765,9 +945,7 @@ def command_get(root: Path, args: argparse.Namespace) -> int:
     return 1
 
 
-def command_audit(root: Path, args: argparse.Namespace) -> int:
-    sources: dict[str, str] = {}
-    events, errors = load_events(root, sources=sources)
+def audit_events(events, errors, sources, args) -> dict:
     issues = [{"kind": "invalid", "detail": error} for error in errors]
     known = {event["event_id"] for event in events}
     superseded = {key for event in events for key in event.get("supersedes", [])}
@@ -824,6 +1002,14 @@ def command_audit(root: Path, args: argparse.Namespace) -> int:
         "checked_events": len(selected), "issues": issues,
         "counts": dict(Counter(item["kind"] for item in issues)),
     }
+    return result
+
+
+def command_audit(root: Path, args: argparse.Namespace) -> int:
+    sources = {}
+    events, errors = load_events(root, sources=sources)
+    result = audit_events(events, errors, sources, args)
+    issues = result["issues"]
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -886,6 +1072,7 @@ def parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser("search", help="搜索原始记忆")
     search.add_argument("query")
+    search.add_argument("--documents", action="store_true", help="搜索允许目录中的文档标题、路径与 Markdown 正文")
     add_filters(search)
     search.add_argument("--sort", choices=("relevance", "recent"), default="relevance")
     search.add_argument("--summary-chars", type=positive_int, default=240)
@@ -930,6 +1117,16 @@ def parser() -> argparse.ArgumentParser:
     get = subparsers.add_parser("get", help="按 ID 读取完整事件及来源文件")
     get.add_argument("event_id")
     get.set_defaults(func=command_get)
+
+    hand = subparsers.add_parser("handoff", help="按任务生成可重复读取的交接视图")
+    hand.add_argument("--task", required=True)
+    hand.add_argument("--limit", type=positive_int, default=5, help="每类最多条数")
+    hand.add_argument("--json", action="store_true")
+    hand.set_defaults(func=command_handoff)
+
+    doctor = subparsers.add_parser("doctor", help="本机只读自检；不联网、不安装或修复链接")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=command_doctor)
 
     audit = subparsers.add_parser("audit", help="只读检查来源、过期候选及 supersedes 引用")
     add_filters(audit)
