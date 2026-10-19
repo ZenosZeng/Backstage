@@ -129,7 +129,7 @@ pixi run claude-feishu --stop
 |---|---|
 | `/help` | 列出全部命令与打断词 |
 | `/claude` / `/dsh` | 为当前 chat 粘性切换 harness，分别保存上下文与统计 |
-| `/new [claude\|dsh\|all]` | 清空指定 harness 上下文，默认当前；保留目录与累计统计 |
+| `/new [claude\|dsh\|all]` | 清空指定 harness 上下文，默认当前，并清空本聊天待执行队列；保留目录与累计统计 |
 | `/status` | 当前 harness、两套会话及统计、CLI 可用性、目录、上下文、队列 |
 | `/restart` | 校验新代码/配置，由宿主 bridge 自行重载；保持会话，就绪后回复原消息 |
 | `/cd <目录>` | 切换该会话的工作目录 |
