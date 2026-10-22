@@ -157,12 +157,68 @@ def test_monitor_uses_existing_once_without_notifications(workspace, monkeypatch
     assert workspace.monitor("b1k")["configured"] is False
 
 
+def test_train_collection_error_is_unavailable_not_empty(workspace, monkeypatch, tmp_path):
+    executable = tmp_path / "kubectl"
+    executable.write_text('#!/bin/sh\necho "private cluster error" >&2\nexit 1\n')
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    config = workspace.local / "config/watchdog-train.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"repo_root": str(tmp_path), "notify": False}))
+    data = workspace.monitor("train")
+    assert data["state"] == "unavailable"
+    assert "private cluster" not in json.dumps(data)
+    executable.write_text('#!/bin/sh\nprintf \'{"items":[]}\'\n')
+    assert workspace.monitor("train")["state"] == "no_data"
+
+
 def test_data_errors_are_visible_instead_of_healthy_empty_state(workspace):
     path = workspace.root / ".share/memory/broken/codex/2026-10-15.json"
     path.parent.mkdir(parents=True)
     path.write_text("invalid JSON")
     data = workspace.overview()
     assert data["errors"] and data["counts"]["events"] == 3
+
+
+def test_context_route_is_bounded_and_keeps_source_semantics(server):
+    data = fetch(server, "/api/context?id=old&before=0&after=0")
+    assert {e["event_id"] for e in data["items"]} == {"old", "new"}
+    assert next(e for e in data["items"] if e["event_id"]=="old")["replaced"]
+    assert data["errors"] == []
+    with pytest.raises(HTTPError) as exc:
+        fetch(server, "/api/context?id=missing")
+    assert exc.value.code == 404
+    with pytest.raises(HTTPError) as exc:
+        fetch(server, "/api/context?id=old&before=100")
+    assert exc.value.code == 400
+
+
+def test_doctor_health_lists_actionable_events_without_modification(workspace):
+    before = {p: p.read_bytes() for p in workspace.root.rglob("*.json")}
+    data = workspace.doctor()
+    health = data["memory_health"]
+    assert health["checked_events"] == 3
+    assert any(i["event_id"]=="new" and i["source"] for i in health["items"])
+    assert len(health["items"]) <= 50
+    assert {p: p.read_bytes() for p in workspace.root.rglob("*.json")} == before
+
+
+def test_services_compare_start_metadata_and_preserve_unknown_old_records(workspace, monkeypatch):
+    from scripts import doctor
+    from tools import service
+    monkeypatch.setattr(doctor, "code_identity", lambda root: {"version": "0.8.0", "commit": "new", "dirty": False})
+    def record(directory, name):
+        if name=="claude-feishu":
+            return {"pid": 123, "ready": True, "code_at_start": {"version": "0.7.1", "commit": "old", "dirty": False}}
+        if name=="watchdog-train":
+            return {"pid": 124, "ready": True}  # 部署前的旧记录
+        return None
+    monkeypatch.setattr(service, "running_record", record)
+    data = workspace.services()
+    items = {item["name"]: item for item in data["items"]}
+    assert items["claude-feishu"]["code_changed"] is True
+    assert items["watchdog-train"]["code_at_start"] is None
+    assert items["watchdog-train"]["code_changed"] is None
 
 
 def test_disconnected_client_does_not_trigger_a_second_error_response(workspace):

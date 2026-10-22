@@ -264,7 +264,11 @@ class MemoryQualityTests(unittest.TestCase):
             path.symlink_to(target, target_is_directory=target.is_dir())
         before = self.files()
         directories = {str(p) for p in self.root.rglob("*") if p.is_dir()}
-        with mock.patch.object(subprocess, 'run', side_effect=AssertionError('No commands or network')):
+        def local_git(command, **_kwargs):
+            self.assertEqual(command[:2], ['git', '--no-optional-locks'])
+            self.assertIn('rev-parse', command)
+            return subprocess.CompletedProcess(command, 128, '', 'not a Git repository')
+        with mock.patch.object(subprocess, 'run', side_effect=local_git):
             result = doctor.inspect_workspace(self.root, home=home)
         self.assertEqual(next(c['state'] for c in result['checks'] if c['name']=='Skill 与入口链接'), 'ok')
         self.assertEqual(next(c['state'] for c in result['checks'] if c['name']=='同步'), 'unconfigured')

@@ -306,7 +306,7 @@ def operation_lock(root: Path, name: str) -> Iterator[None]:
 
 
 def daily_path(root: Path, event: dict[str, Any]) -> Path:
-    date = str(event["created_at"])[:10]
+    date = parse_time(event["created_at"]).date().isoformat()
     return root / ".share" / "memory" / str(event["machine_id"]) / str(event["agent"]) / f"{date}.json"
 
 
@@ -433,17 +433,38 @@ def render_event(event: dict[str, Any], summary_chars: int | None = None) -> str
 
 def supersedes_cycles(events: list[dict[str, Any]]) -> set[str]:
     graph = {event["event_id"]: event.get("supersedes", []) for event in events}
-    cyclic = set()
+    reverse: dict[str, list[str]] = {key: [] for key in graph}
+    for key, targets in graph.items():
+        for target in targets:
+            if target in reverse:
+                reverse[target].append(key)
+    # Iterative Kosaraju: linear in records + references, including long chains.
+    visited, order = set(), []
     for start in graph:
-        pending, visited = list(graph[start]), set()
+        pending = [(start, False)]
+        while pending:
+            key, finished = pending.pop()
+            if finished:
+                order.append(key)
+            elif key in graph and key not in visited:
+                visited.add(key)
+                pending.append((key, True))
+                pending.extend((target, False) for target in graph[key] if target not in visited)
+    visited, cyclic = set(), set()
+    for start in reversed(order):
+        if start in visited:
+            continue
+        component, pending = set(), [start]
+        visited.add(start)
         while pending:
             key = pending.pop()
-            if key == start:
-                cyclic.add(start)
-                break
-            if key not in visited:
-                visited.add(key)
-                pending.extend(graph.get(key, []))
+            component.add(key)
+            for target in reverse[key]:
+                if target not in visited:
+                    visited.add(target)
+                    pending.append(target)
+        if len(component) > 1 or start in graph[start]:
+            cyclic.update(component)
     return cyclic
 
 
@@ -831,6 +852,10 @@ def command_doctor(root: Path, args: argparse.Namespace) -> int:
             print(f"{check['state']}: {check['name']} — {check['detail']}")
             if check.get("hint"):
                 print("  " + check["hint"])
+        code = report["source_code"]
+        print(f"\n本机核心: {code['version'] or '未知'} · {code['commit'] or '提交未知'} · 改动状态: {code['dirty']}")
+        for skill in report["skills"]:
+            print(f"Skill {skill['name']}: {skill['state']} · 最低核心 {skill['minimum_version'] or '未声明'}")
         print("\n本机状态目录: " + report["local_root"])
         for event in report["last_events"]:
             print(f"最后记忆 {event['machine']}/{event['agent']}: {event['created_at']}")
@@ -957,13 +982,118 @@ def command_get(root: Path, args: argparse.Namespace) -> int:
     events, errors = load_events(root, sources=sources)
     if errors:
         raise ValueError("记忆库校验失败，请先运行 validate")
-    for event in events:
-        if event["event_id"] == args.event_id:
-            result = {"source": sources[event["event_id"]], "event": event}
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0
-    print("没有找到该 event_id。", file=sys.stderr)
-    return 1
+    requested = list(dict.fromkeys(args.event_id))
+    if len(requested) > 20:
+        raise ValueError("一次最多读取 20 个 event_id")
+    by_id = {e["event_id"]: e for e in events}
+    missing = [key for key in requested if key not in by_id]
+    items = [{"source": sources[key], "event": by_id[key]} for key in requested if key in by_id]
+    if len(args.event_id) == 1:
+        if missing:
+            print("没有找到该 event_id。", file=sys.stderr)
+            return 1
+        result = items[0]  # 保留原有单条 get 的输出格式
+    else:
+        result = {"items": items, "missing": missing}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if missing else 0
+
+
+def event_context(events, sources, event_id, *, before=3, after=3) -> dict:
+    """Small chronological index around an anchor; full evidence stays in get."""
+    if not 0 <= before <= 10 or not 0 <= after <= 10:
+        raise ValueError("before / after 必须在 0–10 之间")
+    by_id = {e["event_id"]: e for e in events}
+    if event_id not in by_id:
+        raise FileNotFoundError("记忆不存在")
+    anchor = by_id[event_id]
+    projects = {p["name"] for p in anchor["projects"]}
+    task = anchor.get("task_id")
+    def same_scope(e):
+        if task:
+            return e.get("task_id") == task
+        return (not e.get("task_id") and e["workspace"] == anchor["workspace"]
+                and e["topic_key"] == anchor["topic_key"]
+                and {p["name"] for p in e["projects"]} == projects)
+    timeline = sorted((e for e in events if same_scope(e)),
+                      key=lambda e: (parse_time(e["created_at"]), e["event_id"]))
+    index = next(i for i, e in enumerate(timeline) if e["event_id"] == event_id)
+    neighbors = timeline[max(0, index-before):index+after+1]
+    reverse: dict[str, list[str]] = {}
+    for e in events:
+        for target in e.get("supersedes", []):
+            reverse.setdefault(target, []).append(e["event_id"])
+    # 修正链优先于普通邻居；广度遍历只列 20 条，环也不会无限展开。
+    selected, pending = {event_id}, [event_id]
+    cursor = 0
+    while cursor < len(pending) and len(selected) < 20:
+        key = pending[cursor]
+        cursor += 1
+        for related in by_id[key].get("supersedes", []) + reverse.get(key, []):
+            if related in by_id and related not in selected:
+                selected.add(related)
+                pending.append(related)
+                if len(selected) == 20:
+                    break
+    for e in sorted(neighbors, key=lambda e: abs(timeline.index(e)-index)):
+        if len(selected) < 20:
+            selected.add(e["event_id"])
+    items = []
+    for e in sorted((by_id[key] for key in selected), key=lambda e: (parse_time(e["created_at"]), e["event_id"])):
+        key = e["event_id"]
+        items.append({"event_id": key, "title": short_text(e["title"], 160),
+                      "created_at": e["created_at"], "event_type": e["event_type"], "status": e["status"],
+                      "source": sources[key], "excerpt": short_text(e["content"].get("what", ""), 240),
+                      "anchor": key == event_id, "correction": key in pending and key != event_id,
+                      "replaced": bool(reverse.get(key)) or e["status"] == "superseded",
+                      "supersedes": e.get("supersedes", [])[:20], "replaced_by": reverse.get(key, [])[:20],
+                      "omitted_references": max(0, len(e.get("supersedes", []))-20) + max(0, len(reverse.get(key, []))-20)})
+    warnings = []
+    try:
+        task_state = task_states(events).get(task, {}).get("state", "unknown")
+    except ValueError:
+        task_state = "unknown"
+        warnings.append("存在修正环或生命周期引用错误，任务状态无法裁决；请运行 audit。")
+    return {"anchor_id": event_id, "scope": {"task_id": task, "topic_key": None if task else anchor["topic_key"]},
+            "task_state": task_state, "warnings": warnings,
+            "items": items, "scope_total": len(timeline),
+            "omitted_neighbors": sum(e["event_id"] not in selected for e in timeline),
+            "corrections_truncated": any(ref not in selected for key in pending
+                for ref in by_id[key].get("supersedes", []) + reverse.get(key, []) if ref in by_id),
+            "notice": "历史上下文仅供核对；被取代记录与后续候选不构成当前事实或执行授权。完整证据用 get 按 ID 读取。"}
+
+
+def command_context(root: Path, args: argparse.Namespace) -> int:
+    sources = {}
+    events, errors = load_events(root, sources=sources)
+    if errors:
+        raise ValueError("记忆库校验失败，请先运行 validate")
+    report = event_context(events, sources, args.event_id, before=args.before, after=args.after)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    text = f"事件上下文 {report['anchor_id']} · 任务状态 {report['task_state']}\n{report['notice']}\n"
+    text += '\n'.join(report['warnings'])
+    rendered = set()
+    def omission_notice(ids):
+        omitted = report['omitted_neighbors'] + len(report['items']) - len(ids)
+        corrections_omitted = report['corrections_truncated'] or any(
+            (item['anchor'] or item['correction']) and item['event_id'] not in ids
+            for item in report['items'])
+        return f"\n未展示邻域/预算记录 {omitted}；修正链{'有省略' if corrections_omitted else '已列出'}。"
+    if len(text) + len(omission_notice(rendered)) > args.max_chars:
+        text = short_text("预算不足；请增大 --max-chars。", args.max_chars)
+    else:
+        # 先保留锚点和修正链，再读取普通邻居；只省略整条，不截断来源 ID。
+        for item in sorted(report['items'], key=lambda e: (not e['anchor'], not e['correction'])):
+            block = f"\n[{item['created_at']}] {item['title']}（{'已被取代' if item['replaced'] else item['status']}）\n{item['excerpt']}\n来源: {item['event_id']} · {item['source']}\n"
+            selected = rendered | {item['event_id']}
+            if len(text) + len(block) + len(omission_notice(selected)) <= args.max_chars:
+                text += block
+                rendered = selected
+        text += omission_notice(rendered)
+    print(text)
+    return 0
 
 
 def audit_events(events, errors, sources, args) -> dict:
@@ -1003,7 +1133,7 @@ def audit_events(events, errors, sources, args) -> dict:
             kinds.append("parallel_supersedes_candidate")
         if event["event_id"] in cyclic:
             kinds.append("supersedes_cycle")
-        if Path(sources[event["event_id"]]).stem != event["created_at"][:10]:
+        if Path(sources[event["event_id"]]).stem != parse_time(event["created_at"]).date().isoformat():
             kinds.append("legacy_date_mismatch")
         if event["created_at"][-6:] != "+00:00" and not event["created_at"].endswith("Z"):
             kinds.append("legacy_non_utc")
@@ -1136,8 +1266,16 @@ def parser() -> argparse.ArgumentParser:
     validate.set_defaults(func=command_validate)
 
     get = subparsers.add_parser("get", help="按 ID 读取完整事件及来源文件")
-    get.add_argument("event_id")
+    get.add_argument("event_id", nargs="+")
     get.set_defaults(func=command_get)
+
+    context = subparsers.add_parser("context", help="围绕事件读取同任务邻域与修正链，再按 ID get 完整证据")
+    context.add_argument("event_id")
+    context.add_argument("--before", type=int, default=3)
+    context.add_argument("--after", type=int, default=3)
+    context.add_argument("--max-chars", type=positive_int, default=6000, help="文本字符预算；JSON 按事件数限制")
+    context.add_argument("--json", action="store_true")
+    context.set_defaults(func=command_context)
 
     hand = subparsers.add_parser("handoff", help="按任务生成可重复读取的交接视图")
     hand.add_argument("--task", required=True)

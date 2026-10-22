@@ -141,6 +141,8 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 _lock = threading.Lock()  # 同时只执行一条遥控指令
 _queue_lock = threading.Lock()
 _chat_queues: dict[str, deque] = {}  # chat_id -> 排队的 (event, 指令)
+_queue_epochs: dict[str, int] = {}  # /new 也使已出队、尚在等锁的指令失效
+_active_chat: str | None = None  # 与队列同锁，核对归属和打断不能跨越执行交接
 _drain_running = False  # 单消费者：同一时刻最多一个 drain 线程（_queue_lock 保护）
 _token_lock = threading.Lock()
 _restart_pending = threading.Event()
@@ -532,7 +534,7 @@ def _drain_queues() -> None:
                 pending = _chat_queues.get(chat_id)
                 if not pending:
                     continue
-                item = (chat_id, pending.popleft())
+                item = (chat_id, pending.popleft(), _queue_epochs.get(chat_id, 0))
                 if pending:
                     # 还有剩余就轮转到队尾（dict 没有 move_to_end，重插即轮转）
                     _chat_queues.pop(chat_id)
@@ -543,8 +545,8 @@ def _drain_queues() -> None:
             if item is None:
                 _drain_running = False  # 与"确认空队列"同锁，避免漏唤醒
                 return
-        chat_id, (item_data, item_text) = item
-        _execute_and_reply(item_data, item_text, chat_id, queued=True)
+        chat_id, (item_data, item_text), epoch = item
+        _execute_and_reply(item_data, item_text, chat_id, queued=True, queue_epoch=epoch)
 
 
 def _kick_queue() -> None:
@@ -680,8 +682,9 @@ def _cmd_new(data: P2ImMessageReceiveV1, chat_id: str, arg: str = "") -> None:
         _send_reply(data, "用法：`/new [claude|dsh|all]`")
         return
     names = ("claude", "dsh") if arg == "all" else (arg or sessions.harness_name(chat_id),)
-    sessions.reset(chat_id, names)
     with _queue_lock:
+        sessions.reset(chat_id, names)
+        _queue_epochs[chat_id] = _queue_epochs.get(chat_id, 0) + 1
         _chat_queues.pop(chat_id, None)
     _send_reply(data, f"🆕 已清空 {' / '.join(names)} 会话，下条消息从空上下文开始。")
 
@@ -864,24 +867,35 @@ def handle_message(data: P2ImMessageReceiveV1) -> None:
 
 
 def _execute_and_reply(
-    data: P2ImMessageReceiveV1, text: str, chat_id: str = "", *, queued: bool = False
+    data: P2ImMessageReceiveV1, text: str, chat_id: str = "", *, queued: bool = False,
+    queue_epoch: int | None = None,
 ) -> None:
+    global _active_chat
     if queued:
         # 排队项：直接等锁（不抢跑也不回"忙"），轮到自己就执行
         _lock.acquire()
     elif not _lock.acquire(blocking=False):
         # 执行中：打断词直接终止进程组（不经过 _lock），其余消息回"忙"提示
         if _is_interrupt(text):
-            if _request_interrupt():
+            with _queue_lock:
+                own_task = _active_chat == chat_id
+                interrupted = own_task and _request_interrupt()
+            if interrupted:
                 _send_reply(data, "🛑 已打断当前执行。")
+            elif not own_task:
+                _send_reply(data, "（当前聊天没有正在执行的指令）")
             else:
                 _send_reply(data, "（当前没有正在执行的指令）")
         elif not _send_reply(
-            data, "⏳ 上一条指令还在执行。回复「停」可打断；想接续干活用 /queue <指令>。"
+            data, "⏳ 上一条指令还在执行。「停」只打断本聊天发起的任务；想接续干活用 /queue <指令>。"
         ):
             logging.warning("busy reply send failed")
         return
     try:
+        with _queue_lock:
+            if queued and queue_epoch != _queue_epochs.get(chat_id, 0):
+                return
+            _active_chat = chat_id
         if _restart_pending.is_set():
             _send_reply(data, "🔄 bridge 正在重启，就绪后再发送指令。")
             return
@@ -948,6 +962,8 @@ def _execute_and_reply(
         logging.error("exec error: %s", exc)
         _send_reply(data, f"💥 内部错误：{exc}")
     finally:
+        with _queue_lock:
+            _active_chat = None
         _lock.release()
         _kick_queue()  # 任意 chat 有积压都由唯一消费者接手；空队列时是空操作
 

@@ -79,6 +79,14 @@
 
 S3 目录与本地 `.share/` 下的目录一一对应（远端目录名不变，仅本地收纳位置统一在 `.share/` 下）。S3 不设置 release 目录，也不额外实现对象版本管理。Git 中的 `config.template.json` 是新机器初始化的唯一模板；它不包含 remote、项目名称或仓库路径。初始化时会基于它生成本机专属、不会上传的 `config.json`。
 
+## 本地初始化（无需 S3）
+
+在已克隆的 `.agents/` 内运行 `python3 scripts/sync.py --dry-run init --local --machine-id <唯一机器名>`
+预览，再去掉 `--dry-run` 安装。默认工作区为仓库父目录；可传 `--workspace-root`。
+它补齐公开示例模板、本地配置、三个 Agent 的 Skill 链接和工作区入口；不启动服务。
+已有文件保留，入口冲突会在安装前阻止写入；重复运行不改配置，不关闭已有 S3 同步。
+完整操作及手工验证路径见 [最小工作区示例](../examples/README.md)。
+
 ## 新机器初始化
 
 前置条件：
@@ -366,6 +374,28 @@ pixi run memory handoff --task delivery-check --json
 pixi run memory doctor --json
 ```
 
+## 事件上下文与批量证据（v0.8）
+
+日常可以直接要求 Agent“围绕这条记忆核对前因后果和后续修正”。底层先读索引，再取所需证据：
+
+```bash
+pixi run memory context <event_id> --before 3 --after 3 --max-chars 4000
+pixi run memory context <event_id> --json
+pixi run memory get <event_id> <另一个_event_id>
+```
+
+`context` 默认展示同 task 的前后各 3 条（可分别调整到 0–10），并优先纳入修正链，
+总共最多 20 条。跨仓、跨机器的同任务记录保留原来源；无 task 时仅选同工作区、同 topic、
+同项目集合的无 task 记录。按实际时间排序，被取代记录明确标识，任务状态无法裁决时给出提示。
+索引只包含短摘要与来源，完整 `where`、`verified_by` 等证据用 `get` 读取。
+文本按字符预算省略整条记录；JSON 不截断所选条目，按数量限制；省略的邻域和修正链会提示。
+历史上下文不推荐执行旧待办，也不改变任务生命周期。
+
+批量 `get` 每次最多 20 个唯一 ID，保持请求顺序并去重，输出 `items` 和 `missing`；
+任意 ID 不存在时退出 1，已找到条目仍可读取。单个 ID 的 `{source,event}` 输出保持不变。
+
+## 文档检索与任务交接
+
 文档模式搜索允许目录的标题、路径和 Markdown 正文，返回路径及命中行摘录；
 摘录使用 NFKC 显示文本，Unicode 展开不影响命中位置；文档预览保留原文。
 空查询列出文档。此模式不加载 raw memory，损坏的事件文件不阻断文档检索。
@@ -387,6 +417,11 @@ SVG 只搜索标题和路径，不解析其 XML 正文。文档没有 Agent、ta
 或修复文件，也不因为某 Agent 缺少近期记忆就断言采集失效。退出码为 0（通过）、
 1（待核对）、2（错误）；未启用 S3 是正常本地模式。最后事件时间不代表机器在线，
 shared 基线时间不能证明最近一次 raw 同步成功。
+自检还提供本机核心版本、Git 提交与改动状态，记忆审计明细最多展示 50 项，剩余数量明确提示；
+来源不足、长期未核对或并行修正属于核验候选，不自动判定事实失效。
+公开示例 Skill 在 YAML frontmatter 的 `metadata.backstage_min_version` 声明最低核心版本，
+例如 `backstage_min_version: "0.8.0"`（两个空格缩进）。未声明或核心版本不可读时兼容性为未知，
+声明要求高于本机核心时提示更新。此检查只比较声明，不保证外部 Agent 已正确加载 Skill。
 网页自检的基线和冲突取自 `--local-root`，结果标明本机状态目录；CLI 默认使用
 `<root>/.local`。符号链接循环按异常链接报告。Git 缺失或不可执行时，交接仍可读取，
 当前仓库状态标为不可用。

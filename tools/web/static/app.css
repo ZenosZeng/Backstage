@@ -146,3 +146,17 @@ nav a{font-size:14px}.workspace-switch strong{font-size:14px}.workspace-switch d
 .doctor-check>div{min-width:0;overflow-wrap:anywhere}.doctor-check strong{font-size:13px}.doctor-check p{font-size:13px;line-height:1.7;margin:6px 0}.doctor-check small{font-size:12px;line-height:1.7;color:var(--muted)}
 .document-excerpt{white-space:normal!important;line-height:1.6!important;font-size:12px!important}.search-documents{margin-bottom:16px}
 @media(max-width:760px){.handoff-grid{grid-template-columns:minmax(0,1fr)}.handoff-record,.doctor-check{padding:16px}.handoff-repository{display:block}.handoff-repository>*{display:block;margin:6px 0}}
+/* Context and evidence keep long Chinese titles and source paths readable. */
+.context-record,.health-record{display:grid;gap:6px;width:100%;text-align:left;padding:14px 0;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);font:inherit;overflow-wrap:anywhere}
+.context-record:not(:disabled),button.health-record{cursor:pointer}
+.context-record:hover:not(:disabled),button.health-record:hover{color:var(--accent)}
+.context-record:disabled{opacity:1}
+.context-record span,.context-record p,.health-record span,.service-version{font-size:13px;line-height:1.6}
+.context-record span{color:var(--muted)}
+.context-record p{margin:0}
+.context-record code,.health-record code,.doctor-evidence code,.service-version code{font-size:12px;overflow-wrap:anywhere;white-space:normal}
+.doctor-evidence,.health-details{padding:20px;border-top:1px solid var(--line)}
+.doctor-evidence h3{font-size:15px;margin:0 0 10px}
+.doctor-evidence p{font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.health-details summary{cursor:pointer;font-size:14px}
+.health-list{max-height:560px;overflow:auto}

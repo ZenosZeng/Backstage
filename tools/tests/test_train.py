@@ -6,6 +6,7 @@ import os
 import json
 import time
 import pathlib
+import subprocess
 import datetime as dt
 
 import pytest
@@ -13,6 +14,24 @@ import pytest
 from tools.watchdog import notifier as watchdog_notifier
 from tools.watchdog import runner as watchdog_scheduler
 from tools.watchdog import train as watchdog_train
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess(["kubectl"], 1, "", "private stderr"),
+    subprocess.CompletedProcess(["kubectl"], 0, "not json", ""),
+    subprocess.CompletedProcess(["kubectl"], 0, "{}", ""),
+    FileNotFoundError("kubectl"),
+    subprocess.TimeoutExpired("kubectl", 20),
+])
+def test_kubernetes_failure_never_becomes_empty_jobs(monkeypatch, result):
+    def run(*args, **kwargs):
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="Kubernetes") as exc:
+        watchdog_train._kubectl_jobs()
+    assert "private stderr" not in str(exc.value)
 
 
 def _write_progress_log(path: pathlib.Path, *, age_minutes: float) -> None:

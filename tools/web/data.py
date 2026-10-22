@@ -240,6 +240,11 @@ class Workspace:
                                 sources=snap["sources"])
         return result | {"errors": snap["errors"]}
 
+    def context(self, event_id, before=3, after=3):
+        snap = self.snapshot()
+        return memory.event_context(snap["events"], snap["sources"], event_id,
+                                    before=int(before), after=int(after)) | {"errors": snap["errors"]}
+
     def doctor(self):
         from scripts.doctor import inspect_workspace
         return inspect_workspace(self.root, local=self.local)
@@ -291,15 +296,26 @@ class Workspace:
 
     def services(self):
         items = []
+        from scripts.doctor import code_identity
+        installed = code_identity(service.ROOT)
         for name in service.SERVICES:
             directory = self.local / "tools" / name
             record = service.running_record(directory, name)
+            started = record.get("code_at_start") if record else None
+            changed = None
+            if isinstance(started, dict):
+                comparable = [key for key in ("version", "commit") if started.get(key) and installed.get(key)]
+                if any(started[key] != installed[key] for key in comparable):
+                    changed = True
+                elif len(comparable) == 2 and started.get("dirty") is False and installed.get("dirty") is False:
+                    changed = False
             items.append({"name": name, "running": bool(record),
                           "ready": bool(record and record.get("ready")),
                           "pid": record["pid"] if record else None,
+                          "code_at_start": started, "code_changed": changed,
                           "source": str(directory / "pid.json"),
                           "configured": (self.local / "config" / f"{name}.json").is_file()})
-        return {"items": items, "scope": "local", "sampled_at": timestamp(datetime.now().timestamp()),
+        return {"items": items, "installed_code": installed, "scope": "local", "sampled_at": timestamp(datetime.now().timestamp()),
                 "read_at": timestamp(datetime.now().timestamp())}
 
     def monitor(self, kind: str):

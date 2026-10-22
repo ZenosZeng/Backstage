@@ -125,6 +125,8 @@ def test_independent_services_start_reuse_stop(tmp_path):
         record = json.loads(
             (tmp_path / "local/tools/watchdog-b1k/pid.json").read_text()
         )
+        assert record["code_at_start"]["version"] == service.CODE_AT_START["version"]
+        assert record["code_at_start"]["commit"] == service.CODE_AT_START["commit"]
         again = call("b1k", "--config", str(config))
         assert again.returncode == 0 and "already running" in again.stdout
         assert str(record["pid"]) in again.stdout
