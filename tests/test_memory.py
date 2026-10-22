@@ -222,19 +222,32 @@ class MemoryCliTest(unittest.TestCase):
         return self.run_cli("import", "--input", str(path), check=check)
 
     def test_import_uses_safe_utc_shard_without_changing_event(self):
+        imported = 0
         for index, (created, day) in enumerate([
             ("20261022/12:00:00+00:00", "2026-10-22"),
             ("2026-10-22T00:30:00+08:00", "2026-10-21"),
         ]):
             event = self.sample_event(f"safe-{index}", created_at=created)
+            try:
+                dt.datetime.fromisoformat(created)
+            except ValueError:
+                # Python 3.10 does not accept the compact ISO date. Rejecting
+                # it must leave no shard behind rather than lose an event.
+                before = {p: p.read_bytes() for p in self.root.rglob("*.json")}
+                rejected = self.import_events([event], check=False)
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn("created_at", rejected.stderr)
+                self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*.json")})
+                continue
             self.import_events([event])
+            imported += 1
             again = self.import_events([event])
             self.assertIn("新增 0", again.stdout)
             path = self.root / ".share/memory/other-machine/claude" / f"{day}.json"
             self.assertTrue(path.is_file())
             self.assertEqual(json.loads(self.run_cli("get", event["event_id"]).stdout)["event"]["created_at"], created)
         self.run_cli("validate")
-        self.assertEqual(len(list((self.root / ".share/memory").rglob("*.json"))), 2)
+        self.assertEqual(len(list((self.root / ".share/memory").rglob("*.json"))), imported)
 
     def test_conflicting_id_rejects_entire_import_without_writes(self):
         self.import_events([self.sample_event()])
