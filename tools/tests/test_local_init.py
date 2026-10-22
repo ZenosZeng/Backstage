@@ -73,6 +73,22 @@ def test_conflicting_entry_is_rejected_before_any_install(setup, conflict):
     assert not (root / "config.json").exists()
 
 
+@pytest.mark.parametrize("parent", [".codex", ".claude/skills"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_entry_parent_conflict_is_rejected_before_install(setup, parent, dry_run):
+    root, home = setup
+    path = home / parent
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("user-owned file")
+    before = files(root.parent)
+    with pytest.raises(sync.SyncError, match="父路径"):
+        init(root, home, dry_run=dry_run)
+    assert files(root.parent) == before
+    assert not (root / "config.json").exists()
+    assert not (root / ".share").exists()
+    assert path.read_text() == "user-owned file"
+
+
 def test_existing_s3_configuration_and_identity_are_preserved(setup):
     root, home = setup
     init(root, home)

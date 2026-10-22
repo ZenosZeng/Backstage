@@ -1074,20 +1074,24 @@ def command_context(root: Path, args: argparse.Namespace) -> int:
         return 0
     text = f"事件上下文 {report['anchor_id']} · 任务状态 {report['task_state']}\n{report['notice']}\n"
     text += '\n'.join(report['warnings'])
-    if len(text) > args.max_chars:
+    rendered = set()
+    def omission_notice(ids):
+        omitted = report['omitted_neighbors'] + len(report['items']) - len(ids)
+        corrections_omitted = report['corrections_truncated'] or any(
+            (item['anchor'] or item['correction']) and item['event_id'] not in ids
+            for item in report['items'])
+        return f"\n未展示邻域/预算记录 {omitted}；修正链{'有省略' if corrections_omitted else '已列出'}。"
+    if len(text) + len(omission_notice(rendered)) > args.max_chars:
         text = short_text("预算不足；请增大 --max-chars。", args.max_chars)
     else:
-        # 先保留锚点，再按时间读取邻居；只省略整条，不截断来源 ID。
-        omitted = report['omitted_neighbors']
-        for item in sorted(report['items'], key=lambda e: not e['anchor']):
+        # 先保留锚点和修正链，再读取普通邻居；只省略整条，不截断来源 ID。
+        for item in sorted(report['items'], key=lambda e: (not e['anchor'], not e['correction'])):
             block = f"\n[{item['created_at']}] {item['title']}（{'已被取代' if item['replaced'] else item['status']}）\n{item['excerpt']}\n来源: {item['event_id']} · {item['source']}\n"
-            if len(text) + len(block) + 100 <= args.max_chars:
+            selected = rendered | {item['event_id']}
+            if len(text) + len(block) + len(omission_notice(selected)) <= args.max_chars:
                 text += block
-            else:
-                omitted += 1
-        tail = f"\n未展示邻域/预算记录 {omitted}；修正链{'有省略' if report['corrections_truncated'] else '已列出'}。"
-        if len(text) + len(tail) <= args.max_chars:
-            text += tail
+                rendered = selected
+        text += omission_notice(rendered)
     print(text)
     return 0
 

@@ -887,7 +887,7 @@ def _execute_and_reply(
             else:
                 _send_reply(data, "（当前没有正在执行的指令）")
         elif not _send_reply(
-            data, "⏳ 上一条指令还在执行。回复「停」可打断；想接续干活用 /queue <指令>。"
+            data, "⏳ 上一条指令还在执行。「停」只打断本聊天发起的任务；想接续干活用 /queue <指令>。"
         ):
             logging.warning("busy reply send failed")
         return

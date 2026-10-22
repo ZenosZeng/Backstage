@@ -70,6 +70,41 @@ def test_cli_context_budget_batch_get_and_legacy_single_get(tmp_path):
     assert run("context", "absent").returncode != 0
 
 
+def test_cli_context_reports_corrections_omitted_by_text_budget(tmp_path):
+    memory.append_events(tmp_path, [event("old", content={"what": "evidence " * 20}),
+                                    event("new", 1, supersedes=["old"],
+                                          content={"what": "evidence " * 20})])
+    def context(budget):
+        result = subprocess.run([sys.executable, memory.__file__, "--root", str(tmp_path),
+                                 "context", "old", "--before", "0", "--after", "0",
+                                 "--max-chars", str(budget)], text=True, capture_output=True)
+        assert result.returncode == 0
+        assert len(result.stdout.rstrip()) <= budget
+        return result.stdout
+    anchor_only = context(600)
+    assert "来源: old ·" in anchor_only and "来源: new ·" not in anchor_only
+    assert "修正链有省略" in anchor_only and "修正链已列出" not in anchor_only
+    neither = context(220)
+    assert "来源:" not in neither and "修正链有省略" in neither
+    assert "预算不足" in context(20)
+    complete = context(900)
+    assert "来源: new ·" in complete and "修正链已列出" in complete
+
+
+def test_cli_context_gives_corrections_budget_before_ordinary_neighbors(tmp_path):
+    long_content = {"what": "细节" * 120}
+    memory.append_events(tmp_path, [event("anchor", content=long_content),
+                                    event("neighbor", 1, content=long_content),
+                                    event("correction", 2, supersedes=["anchor"], content=long_content)])
+    result = subprocess.run([sys.executable, memory.__file__, "--root", str(tmp_path),
+                             "context", "anchor", "--before", "0", "--after", "1",
+                             "--max-chars", "900"], text=True, capture_output=True)
+    assert result.returncode == 0 and len(result.stdout.rstrip()) <= 900
+    assert "来源: anchor ·" in result.stdout and "来源: correction ·" in result.stdout
+    assert "来源: neighbor ·" not in result.stdout
+    assert "修正链已列出" in result.stdout and "未展示邻域/预算记录 1" in result.stdout
+
+
 def test_linear_cycle_detection_keeps_only_cycle_members_on_deep_graph():
     events = [{"event_id": str(i), "supersedes": [str(i+1)]} for i in range(10000)]
     assert memory.supersedes_cycles(events) == set()

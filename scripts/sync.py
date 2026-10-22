@@ -1055,6 +1055,11 @@ def init_local(root: Path, args: argparse.Namespace) -> int:
     links = agent_links(root, config, skills=list(skills))
     # 所有入口冲突先检查；失败时不留下半套配置或链接。
     for path, target in links:
+        for parent in path.parents:
+            if parent.exists() or parent.is_symlink():
+                if not parent.is_dir():
+                    raise SyncError(f"入口父路径不是可用目录：{parent}")
+                break
         ensure_link(path, target, dry_run=True, managed_root=root / ".share")
     if args.dry_run:
         print(f"DRY-RUN: 保留已有文件，补齐 {len(missing)} 个模板文件；配置为本地模式，不连接 S3")
