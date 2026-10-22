@@ -221,6 +221,21 @@ class MemoryCliTest(unittest.TestCase):
         path.write_text(json.dumps(events), encoding="utf-8")
         return self.run_cli("import", "--input", str(path), check=check)
 
+    def test_import_uses_safe_utc_shard_without_changing_event(self):
+        for index, (created, day) in enumerate([
+            ("20261022/12:00:00+00:00", "2026-10-22"),
+            ("2026-10-22T00:30:00+08:00", "2026-10-21"),
+        ]):
+            event = self.sample_event(f"safe-{index}", created_at=created)
+            self.import_events([event])
+            again = self.import_events([event])
+            self.assertIn("新增 0", again.stdout)
+            path = self.root / ".share/memory/other-machine/claude" / f"{day}.json"
+            self.assertTrue(path.is_file())
+            self.assertEqual(json.loads(self.run_cli("get", event["event_id"]).stdout)["event"]["created_at"], created)
+        self.run_cli("validate")
+        self.assertEqual(len(list((self.root / ".share/memory").rglob("*.json"))), 2)
+
     def test_conflicting_id_rejects_entire_import_without_writes(self):
         self.import_events([self.sample_event()])
         before = {str(p): p.read_bytes() for p in (self.root / ".share").rglob("*.json")}

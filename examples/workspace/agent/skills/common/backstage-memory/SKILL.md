@@ -1,6 +1,8 @@
 ---
 name: backstage-memory
 description: 在使用 Backstage 的多仓工作区中读取和追加可追溯记忆，按本机配置同步 S3，并维护跨仓任务状态。适用于实质性开发或任务接续，不用于简单闲聊。
+metadata:
+  backstage_min_version: "0.8.0"
 ---
 
 # Backstage 工作区记忆
@@ -21,8 +23,13 @@ description: 在使用 Backstage 的多仓工作区中读取和追加可追溯�
 ```bash
 python3 scripts/memory.py brief --task <task-id>
 python3 scripts/memory.py search "<相关关键词>" --current --limit 10
-python3 scripts/memory.py get <event_id>
+python3 scripts/memory.py context <event_id> --max-chars 4000
+python3 scripts/memory.py get <event_id> [<其他 event_id> ...]
 ```
+
+先用摘要定位 ID，需要理解前因后果时读取 `context` 的同任务邻域和修正链，
+再批量 `get` 所需完整证据（每次最多 20 条）。无 task 的事件只关联同 topic、同项目集合的无 task 记录。
+初始化或更新后可用 `memory.py doctor` 检查链接、核心版本与记忆健康；不依赖远端查询。
 
 摘要只用于定位，重要结论核对原始来源与当前代码或真实环境。`--current` 只排除被显式
 取代的事件；旧待办和未知任务状态不能当成当前执行授权。

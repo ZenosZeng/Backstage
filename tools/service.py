@@ -19,9 +19,11 @@ import uuid
 from typing import Callable
 
 from tools.config import ROOT, atomic_json, load_config, local_root
+from scripts.doctor import code_identity
 
 
 SERVICES = ("watchdog-b1k", "watchdog-train", "claude-feishu")
+CODE_AT_START = code_identity(ROOT)
 
 
 @dataclass
@@ -306,6 +308,7 @@ def main(
                 "config_path": str(config_path),
                 "generation": str(uuid.uuid4()),
                 "ready": app.ready,
+                "code_at_start": CODE_AT_START,
             }
 
             def request_restart(_signum, _frame):

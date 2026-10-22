@@ -64,6 +64,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = workspace.events(query)
             elif url.path == "/api/event":
                 data = workspace.event(query["id"])
+            elif url.path == "/api/context":
+                data = workspace.context(query["id"], query.get("before", 3), query.get("after", 3))
             elif url.path == "/api/documents":
                 data = {"items": workspace.documents(query.get("business"), query.get("q", ""), query.get("sort", "relevance"))}
             elif url.path == "/api/document":

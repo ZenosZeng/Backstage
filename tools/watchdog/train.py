@@ -46,9 +46,12 @@ STALL_FAIL_MIN = 60
 def _run(cmd: list[str]) -> str:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        return (result.stdout or result.stderr).strip()
-    except Exception:  # noqa: BLE001
-        return ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Kubernetes 采集不可用（命令缺失、超时或无法启动）") from exc
+    if result.returncode:
+        # stderr 可能含集群地址或认证信息，不带入状态卡和 Web 响应。
+        raise RuntimeError(f"Kubernetes 采集失败（kubectl exit {result.returncode}）")
+    return result.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +108,9 @@ def _kubectl_jobs() -> dict[str, dict]:
     bindings = _native_bindings()
     try:
         data = json.loads(out)
-        for item in data.get("items", []):
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("missing jobs list")
+        for item in data["items"]:
             name = item["metadata"]["name"]
             status = item.get("status", {})
             jobs[name] = {
@@ -139,8 +144,8 @@ def _kubectl_jobs() -> dict[str, dict]:
                 "exp_name": "",  # resolved from the script first, then legacy mtime matching
                 **bindings.get(name, {}),
             }
-    except Exception:  # noqa: BLE001
-        pass
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise RuntimeError("Kubernetes 返回了无效的 jobs 数据") from exc
     # Associate each job with a training/eval name by matching its submit
     # timestamp against kjob log files. The experiment identity lives inside
     # the container shell and is invisible to Kubernetes.

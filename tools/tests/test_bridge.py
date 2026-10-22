@@ -861,10 +861,76 @@ class CommandTests(unittest.TestCase):
             [(_event(), "第一条"), (_event(), "第二条")]
         )
         with mock.patch.object(bridge, "_execute_and_reply",
-                               side_effect=lambda d, t, c, queued=False: order.append(t)):
+                               side_effect=lambda d, t, c, queued=False, **_kwargs: order.append(t)):
             bridge._drain_queues()
         self.assertEqual(order, ["第一条", "第二条"])
         self.assertEqual(bridge._queue_position("chat"), 0)
+
+    def test_new_cancels_dequeued_item_waiting_for_execution(self):
+        from collections import deque
+
+        bridge = self.bridge
+        waiting = threading.Event()
+        execute = bridge._execute_and_reply
+
+        def observed(*args, **kwargs):
+            waiting.set()  # drain 已出队，实际执行仍将等待 _lock
+            execute(*args, **kwargs)
+
+        bridge._chat_queues["chat"] = deque([(_event(), "old action")])
+        bridge._chat_queues["other"] = deque([(_event(), "other action")])
+        bridge._lock.acquire()
+        worker = threading.Thread(target=bridge._drain_queues)
+        with (
+            mock.patch.object(bridge, "_execute_and_reply", side_effect=observed),
+            mock.patch.object(bridge, "_kick_queue"),
+            mock.patch.object(bridge, "_post_card_reply", return_value=None),
+            mock.patch.object(bridge, "_send_reply", return_value=True),
+            mock.patch.object(bridge, "_run_claude", return_value=("ok", bridge.RunState())) as run,
+        ):
+            try:
+                worker.start()
+                self.assertTrue(waiting.wait(3))
+                bridge._cmd_new(_event(), "chat")
+                bridge._cmd_queue(_event(), "chat", "new action")
+            finally:
+                bridge._lock.release()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual([c.args[:2] for c in run.call_args_list],
+                             [("other action", "other"), ("new action", "chat")])
+
+    def test_stop_only_interrupts_own_chat(self):
+        bridge = self.bridge
+        started, finish = threading.Event(), threading.Event()
+
+        def running(*args, **kwargs):
+            started.set()
+            if not finish.wait(5):
+                raise RuntimeError("test did not release runner")
+            return "ok", bridge.RunState()
+
+        worker = threading.Thread(target=bridge._execute_and_reply,
+                                  args=(_event(), "work", "owner"))
+        with (
+            mock.patch.object(bridge, "_post_card_reply", return_value=None),
+            mock.patch.object(bridge, "_send_reply", return_value=True),
+            mock.patch.object(bridge, "_kick_queue"),
+            mock.patch.object(bridge, "_run_claude", side_effect=running),
+            mock.patch.object(bridge, "_request_interrupt", return_value=True) as stop,
+        ):
+            try:
+                worker.start()
+                self.assertTrue(started.wait(3))
+                bridge._execute_and_reply(_event(), "停", "other")
+                stop.assert_not_called()
+                bridge._execute_and_reply(_event(), "停", "owner")
+                stop.assert_called_once()
+            finally:
+                finish.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertIsNone(bridge._active_chat)
 
 
 class AuditFixTests(unittest.TestCase):
@@ -969,7 +1035,7 @@ class AuditFixTests(unittest.TestCase):
         order = []
         bridge._chat_queues["chat-b"] = __import__("collections").deque([(_event(), "B 的活")])
         with mock.patch.object(bridge, "_execute_and_reply",
-                               side_effect=lambda d, t, c, queued=False: order.append((c, t))):
+                               side_effect=lambda d, t, c, queued=False, **_kwargs: order.append((c, t))):
             bridge._drain_queues()
         self.assertEqual(order, [("chat-b", "B 的活")])
         self.assertEqual(bridge._queue_position("chat-b"), 0)
@@ -982,7 +1048,7 @@ class AuditFixTests(unittest.TestCase):
         bridge._chat_queues["b"] = deque([(_event(), "b1")])
         order = []
         with mock.patch.object(bridge, "_execute_and_reply",
-                               side_effect=lambda d, t, c, queued=False: order.append(t)):
+                               side_effect=lambda d, t, c, queued=False, **_kwargs: order.append(t)):
             bridge._drain_queues()
         self.assertEqual(order[0], "a1")
         self.assertIn("b1", order[:2])  # b 不被 a 的两条压在后面
@@ -1063,7 +1129,7 @@ class QueueFifoTests(unittest.TestCase):
         order: list[str] = []
         order_lock = threading.Lock()
 
-        def fake_exec(_d, t, _c, queued=False):
+        def fake_exec(_d, t, _c, queued=False, **_kwargs):
             with order_lock:
                 order.append(t)
             time.sleep(0.005)  # 拉大并发窗口
@@ -1118,7 +1184,7 @@ class QueueFifoTests(unittest.TestCase):
         from collections import deque
         order = []
         with mock.patch.object(bridge, "_execute_and_reply",
-                               side_effect=lambda d, t, c, queued=False: order.append(t)):
+                               side_effect=lambda d, t, c, queued=False, **_kwargs: order.append(t)):
             bridge._kick_queue()
             deadline = time.time() + 5
             while bridge._drain_running and time.time() < deadline:

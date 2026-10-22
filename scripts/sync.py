@@ -927,17 +927,19 @@ def ensure_link(
     path.symlink_to(target, target_is_directory=target.is_dir())
 
 
-def agent_links(root: Path, config: dict[str, Any], *, home: Path | None = None) -> list[tuple[Path, Path]]:
+def agent_links(root: Path, config: dict[str, Any], *, home: Path | None = None,
+                skills: list[Path] | None = None) -> list[tuple[Path, Path]]:
     """Describe managed links for both installation and read-only diagnostics."""
     home = home or Path.home()
     skills_root = root / ".share" / "agent" / "skills"
     # 2026-08-12 skills 按 common/eval/memory/train 分类后为多级布局：
     # 递归发现所有含 SKILL.md 的目录（父目录即 skill 名），跳过分类目录本身。
-    skills = sorted(
+    skills = sorted(set(skills)) if skills is not None else sorted(
         skill_path.parent
         for skill_path in skills_root.rglob("SKILL.md")
         if skill_path.parent != skills_root and skill_path.parent.is_dir()
     )
+    skills = [skill for skill in skills if skill != skills_root]
     # Old layouts leave a copy in a category named after its nested skill.
     # Retain remote files for old clients; only link the canonical nested entry.
     skills = [
@@ -998,8 +1000,84 @@ def build_local_config(
     return config
 
 
+def init_local(root: Path, args: argparse.Namespace) -> int:
+    """Install the bundled example and links without enabling or contacting S3."""
+    config_path = root / "config.json"
+    if config_path.exists():
+        try:
+            config = memory_store.load_config(root)
+        except (ValueError, TypeError) as exc:
+            raise SyncError("已有配置无效；请先用 memory doctor 核对") from exc
+        if not isinstance(config.get("sync", {}), dict):
+            raise SyncError("已有 sync 配置必须是 object")
+        if config.get("sync", {}).get("enabled"):
+            raise SyncError("已有配置启用了 S3；本地初始化不会关闭或覆盖它")
+        if args.machine_id and args.machine_id != config["machine_id"]:
+            raise SyncError("已有 machine_id 不同；保留原配置，请显式整理后再初始化")
+        if args.workspace_root and Path(args.workspace_root).expanduser().resolve() != memory_store.workspace_root(config).resolve():
+            raise SyncError("已有 workspace_root 不同；本地初始化不会迁移工作区")
+    else:
+        if not args.machine_id or not SAFE_NAME.fullmatch(args.machine_id):
+            raise SyncError("init --local 需要有效的 --machine-id")
+        config = read_json(root / "config.template.json")
+        config.update(machine_id=args.machine_id, machine_role=args.machine_role or "development",
+                      workspace_root=str(Path(args.workspace_root).expanduser().resolve() if args.workspace_root else root.parent))
+        config["sync"].update(enabled=False, initialized=False, remote="")
+
+    if memory_store.workspace_root(config).resolve() / ".agents" != root:
+        raise SyncError("公开本地模板要求工具仓库位于 <workspace_root>/.agents；请先整理路径")
+
+    template = root / "examples/workspace"
+    if not template.is_dir():
+        raise SyncError("缺少 examples/workspace 本地模板；请更新 public Git core")
+    directories = [root / ".share" / name for name in SHARED_DIRS]
+    for directory in directories:
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise SyncError(f"共享目录存在类型或链接冲突：{directory}")
+    missing = []
+    skills = {p.parent for p in (root / ".share/agent/skills").rglob("SKILL.md")}
+    for source in sorted(template.rglob("*")):
+        if not source.is_file():
+            continue
+        target = root / ".share" / source.relative_to(template)
+        # 初始化只补缺，不沿共享区内的链接写入其他目录。
+        for ancestor in (target, *target.parents):
+            if ancestor == root:
+                break
+            if ancestor.is_symlink() or (ancestor.exists() and ancestor != target and not ancestor.is_dir()):
+                raise SyncError(f"模板目标存在链接或目录冲突：{ancestor}")
+        if target.exists() and not target.is_file():
+            raise SyncError(f"模板目标不是普通文件：{target}")
+        if not target.exists():
+            missing.append((source, target))
+        if target.name == "SKILL.md":
+            skills.add(target.parent)
+    links = agent_links(root, config, skills=list(skills))
+    # 所有入口冲突先检查；失败时不留下半套配置或链接。
+    for path, target in links:
+        ensure_link(path, target, dry_run=True, managed_root=root / ".share")
+    if args.dry_run:
+        print(f"DRY-RUN: 保留已有文件，补齐 {len(missing)} 个模板文件；配置为本地模式，不连接 S3")
+        return 0
+    with shared_lock(root):
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+        for source, target in missing:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as handle:
+                handle.write(source.read_bytes())
+        if not config_path.exists():
+            atomic_write_json(config_path, config)
+        for path, target in links:
+            ensure_link(path, target, dry_run=False, managed_root=root / ".share")
+    print("本地初始化完成：Prompt / Skill 已接入；无需 S3。日常直接向 Agent 提问。")
+    return 0
+
+
 def command_init(root: Path, args: argparse.Namespace) -> int:
     validate_control_plane(root)
+    if getattr(args, "local", False):
+        return init_local(root, args)
     if args.push:
         config = load_config(root, require_initialized=False)
         require_shared_writer(config, allow_non_writer=args.allow_non_writer)
@@ -1066,7 +1144,7 @@ def command_init(root: Path, args: argparse.Namespace) -> int:
         remote=remote,
         machine_id=args.machine_id,
         machine_role=args.machine_role,
-        workspace_root=args.workspace_root,
+            workspace_root=args.workspace_root or "~/code",
         shared_writer=args.shared_writer,
         clear_proxy=clear_proxy,
     )
@@ -1246,10 +1324,11 @@ def parser() -> argparse.ArgumentParser:
     mode = init.add_mutually_exclusive_group(required=True)
     mode.add_argument("--push", action="store_true", help="从当前机器初始化 S3")
     mode.add_argument("--pull", action="store_true", help="从 S3 初始化新机器")
+    mode.add_argument("--local", action="store_true", help="安装本地模板和 Agent 入口，不连接 S3")
     init.add_argument("--remote")
     init.add_argument("--machine-id")
     init.add_argument("--machine-role")
-    init.add_argument("--workspace-root", default="~/code")
+    init.add_argument("--workspace-root", help="工作区目录；local 默认仓库父目录，pull 默认 ~/code")
     init.add_argument("--shared-writer", action="store_true")
     init.add_argument("--clear-proxy", action=argparse.BooleanOptionalAction, default=True)
     init.add_argument("--reuse-machine", action="store_true")

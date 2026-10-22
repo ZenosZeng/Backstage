@@ -6,7 +6,28 @@
 `workspace/` 是 `.share/` 的最小模板，包含通用的 `backstage-memory` Skill、
 `AGENTS.md` / `CLAUDE.md` 入口和工作区知识首页。它们不包含私人项目、凭据或历史记忆。
 
-## 1. 创建本地示例
+## 推荐：本地接入后直接提问
+
+完成 README 的克隆步骤后，在 `.agents/` 目录执行一次：
+
+```bash
+python3 scripts/sync.py --dry-run init --local --machine-id demo-machine-01
+python3 scripts/sync.py init --local --machine-id demo-machine-01
+python3 scripts/memory.py doctor
+```
+
+初始化使用仓库父目录作为工作区，也可显式传 `--workspace-root /path/to/workspace`。
+公开模板要求工具仓库位于该工作区的 `.agents/`，路径不符时会提示整理。
+它只补齐缺失的公开模板、创建本地配置，并复用现有链接逻辑接入 Codex、Claude Code、
+Kimi；不连接 S3、不启动服务，重复运行保留已有配置和知识。
+`--dry-run` 预检所有链接冲突，不写文件。已有独立 `AGENTS.md`、`CLAUDE.md` 或同名 Skill
+会在安装前阻止操作，请先人工合并自己的规则到目标模板并整理入口，不要强制覆盖。
+已有 S3 配置不会被关闭；`--local` 只用于新工作区或尚未启用 S3 的本地工作区。
+
+接好后在 Agent 中说“继续这个项目，先回顾相关记忆”，无需日常手动运行记忆命令。
+下文第 2 节可用于验证读写；有多机共享需求时再接第 3 节。
+
+## 1. 手工创建本地示例（可选）
 
 以下命令用于一个全新的演示目录。已有工作区应按需合并模板，保留自己的配置和知识。
 
@@ -35,8 +56,8 @@ path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
 PY
 ```
 
-本地模式保留空的 `sync.remote` 和 `sync.initialized=false`，只运行 `memory` 命令。
-此阶段不会向 S3 上传内容，也不会修改 Agent 的 Skill 或入口链接。
+这条手工路径保留空的 `sync.remote` 和 `sync.initialized=false`，只验证 `memory` 命令，
+不会修改 Agent 的 Skill 或入口链接。完成后可用上面的 `init --local` 接入 Agent。
 
 ## 2. 写入并查询第一条记忆
 

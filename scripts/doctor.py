@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,10 +15,28 @@ except ModuleNotFoundError:
     import sync
 
 
+def code_identity(root: Path) -> dict:
+    """Local source evidence; never ask a remote for a 'latest' version."""
+    try:
+        manifest = (root / 'pixi.toml').read_text(encoding='utf-8')
+        match = re.search(r'^version\s*=\s*"(\d+\.\d+\.\d+)"', manifest, re.MULTILINE)
+        version = match[1] if match else None
+    except (OSError, UnicodeError):
+        version = None
+    top = memory.git_value(root, 'rev-parse', '--show-toplevel', timeout=2)
+    tracked = top is not None and Path(top).resolve() == root.resolve()
+    commit = memory.git_value(root, 'rev-parse', 'HEAD', timeout=2) if tracked else None
+    status = memory.git_value(root, 'status', '--porcelain', '--untracked-files=no',
+                              timeout=2, allow_empty=True) if tracked else None
+    return {'version': version, 'commit': commit, 'dirty': bool(status) if status is not None else None}
+
+
 def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | None = None) -> dict:
     root = root.resolve()
     local = (local or root / ".local").resolve()
     checks = []
+    code = code_identity(root)
+    skills = []
     def add(name, state, detail, hint=''):
         checks.append({'name': name, 'state': state, 'detail': detail, 'hint': hint})
     try:
@@ -29,6 +48,7 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
         config = None
         add('配置', 'error', '配置缺失、不可读或字段无效', '检查 config.json；自检不输出配置值或凭据。')
     sources = {}
+    health = {'checked_events': 0, 'counts': {}, 'items': [], 'omitted': 0, 'stale_days': 60}
     try:
         events, errors = memory.load_events(root, sources=sources)
         lifecycle = memory.lifecycle_reference_errors(events)
@@ -44,6 +64,12 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
                   'legacy_non_utc':'历史非 UTC 时间', 'task_state_conflict':'任务状态冲突',
                   'invalid_lifecycle_reference':'生命周期引用无效', 'lifecycle_cycle':'生命周期成环',
                   'invalid':'读取或格式错误'}
+        by_id = {e['event_id']: e for e in events}
+        health.update(checked_events=report['checked_events'], counts=report['counts'],
+                      items=[dict(item, label=labels.get(item['kind'], '待核对'),
+                                  title=memory.short_text(by_id.get(item.get('event_id'), {}).get('title', ''), 160))
+                             for item in report['issues'][:50]],
+                      omitted=max(0, len(report['issues'])-50))
         counts_text = '；'.join(f"{labels.get(k, '其他待核对项')} {n} 项" for k, n in report['counts'].items())
         add('记忆审计', 'warning' if report['issues'] else 'ok', counts_text or '未发现审计候选问题',
             '审计只列候选问题；不会删除历史或自动裁决冲突。' if report['issues'] else '')
@@ -73,6 +99,24 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
             add('入口一致性', 'ok' if equal else 'warning', '两份入口全文一致' if equal else '两份入口内容不同')
         except OSError:
             add('入口一致性', 'warning', '入口 Prompt 尚未完整配置')
+        for path in sorted((root / '.share/agent/skills').rglob('SKILL.md')):
+            try:
+                text = path.read_text(encoding='utf-8')
+                front = text.split('---', 2)[1] if text.startswith('---\n') and len(text.split('---', 2)) == 3 else ''
+                match = re.search(r'^  backstage_min_version:\s*[\'\"]?(\d+\.\d+\.\d+)[\'\"]?\s*$', front, re.MULTILINE)
+                minimum = match[1] if match else None
+                state = 'unknown'
+                if minimum and code['version']:
+                    state = 'compatible' if tuple(map(int, code['version'].split('.'))) >= tuple(map(int, minimum.split('.'))) else 'outdated'
+                if 'backstage_min_version:' in front and minimum is None:
+                    state = 'invalid'
+                skills.append({'name': path.parent.name, 'minimum_version': minimum, 'state': state})
+            except (OSError, UnicodeError):
+                skills.append({'name': path.parent.name, 'minimum_version': None, 'state': 'unreadable'})
+        incompatible = [s for s in skills if s['state'] in {'outdated', 'invalid', 'unreadable'}]
+        add('Skill 核心版本', 'warning' if incompatible else 'ok' if skills and all(s['state']=='compatible' for s in skills) else 'unconfigured',
+            f"{len(skills)} 个 Skill；{len(incompatible)} 个版本不符或声明不可读；{sum(s['state']=='unknown' for s in skills)} 个版本要求未知",
+            '按各 Skill 声明核对 Git 核心；未声明要求不代表兼容性已验证。')
         sync_config = config.get('sync', {})
         if not isinstance(sync_config, dict):
             add('同步', 'error', 'sync 字段必须是 object')
@@ -104,4 +148,5 @@ def inspect_workspace(root: Path, *, home: Path | None = None, local: Path | Non
     return {'state': 'error' if counts['error'] else 'warning' if counts['warning'] else 'ok',
             'sampled_at': datetime.now(timezone.utc).isoformat(), 'scope': 'local', 'local_root': str(local), 'checks': checks,
             'last_events': [{'machine': m, 'agent': a, 'created_at': at} for (m, a), at in sorted(latest.items())],
+            'source_code': code, 'skills': skills, 'memory_health': health,
             'notice': '只读本机自检；最后记忆时间不代表机器在线或远端同步成功。'}
