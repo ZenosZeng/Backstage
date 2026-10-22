@@ -60,6 +60,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/overview":
                 data = workspace.overview()
+            elif url.path == "/api/timeline":
+                data = workspace.timeline(query.get("project"), query.get("task"))
             elif url.path == "/api/events":
                 data = workspace.events(query)
             elif url.path == "/api/event":
