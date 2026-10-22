@@ -133,6 +133,98 @@ class Workspace:
     def overview(self):
         return self.snapshot()["overview"]
 
+    def timeline(self, project=None, task=None):
+        """Project recorded activity; dates are evidence bounds, never a plan."""
+        snap = self.snapshot()
+        if task and not project:
+            raise ValueError("筛选任务时须同时指定项目")
+        available = {item["name"]: item for item in snap["overview"]["projects"]}
+        if project and project not in available:
+            raise FileNotFoundError("项目不存在")
+        selected = {project: available[project]} if project else available
+        grouped = {name: [] for name in selected}
+        knowledge = bool(snap["projects"])
+        for event in snap["events"]:
+            names = snap["membership"].get(event["event_id"], ()) if knowledge else (
+                item["name"] for item in event["projects"]
+            )
+            for name in names:
+                if name in grouped:
+                    grouped[name].append(event)
+
+        def at(event):
+            return memory.parse_time(event["created_at"]).isoformat()
+
+        def bounds(events):
+            return (at(events[0]), at(events[-1])) if events else (None, None)
+
+        projects = []
+        for name, metadata in selected.items():
+            events = grouped[name]  # The shared snapshot is already sorted in UTC.
+            by_task = {}
+            for event in events:
+                if event.get("task_id") not in (None, "", "-"):
+                    by_task.setdefault(event["task_id"], []).append(event)
+            rows = []
+            counts = dict.fromkeys(("active", "paused", "closed", "unknown", "conflict"), 0)
+            for task_id, related in by_task.items():
+                lifecycle = snap["tasks"].get(task_id, {})
+                state = lifecycle.get("state", "unknown")
+                counts[state] += 1
+                first, last = bounds(related)
+                title = next((e["title"] for e in related if "task_state" not in e["content"]), task_id)
+                rows.append({
+                    "task_id": task_id, "title": memory.short_text(title, 100), "state": state,
+                    "first_recorded_at": first, "last_recorded_at": last,
+                    "last_title": related[-1]["title"],
+                    "state_heads": [{"event_id": e["event_id"], "created_at": at(e),
+                                     "task_state": e["content"]["task_state"]}
+                                    for e in lifecycle.get("heads", [])],
+                })
+            if task and task not in by_task:
+                raise FileNotFoundError("任务不属于此项目")
+            first, last = bounds(events)
+            item = {
+                "name": name, "title": metadata.get("title", name),
+                "description": metadata.get("description", metadata.get("path", "")),
+                "kind": metadata["kind"], "home": metadata.get("home"),
+                "documents": metadata.get("documents", []),
+                "repositories": metadata.get("repositories", [name]),
+                "first_recorded_at": first, "last_recorded_at": last,
+                "event_count": len(events), "task_count": len(rows), "task_counts": counts,
+            }
+            if project:
+                item["tasks"] = rows
+                related = by_task[task] if task else events
+                # Keep lifecycle history even when a later transition supersedes
+                # it. Ordinary obsolete conclusions do not become milestones.
+                current = [e for e in related if "task_state" in e["content"] or (
+                    e["event_id"] not in snap["replaced"] and e["status"] != "superseded"
+                )]
+                candidates = {e["event_id"] for e in current
+                              if "task_state" in e["content"] or
+                              e["event_type"] in {"decision", "bugfix", "test_result", "risk"}}
+                if current:
+                    candidates.update((current[0]["event_id"], current[-1]["event_id"]))
+                milestones = [e for e in current if e["event_id"] in candidates]
+                total = len(milestones)
+                if total > 40:
+                    # Even sampling preserves both ends of the project's history.
+                    milestones = [milestones[round(i * (total - 1) / 39)] for i in range(40)]
+                item["milestones"] = [summary(e, snap["sources"], snap["replaced"]) | {
+                    "created_at": at(e), "task_state": e["content"].get("task_state"),
+                    "is_historical": e["event_id"] in snap["replaced"] or e["status"] == "superseded",
+                } for e in milestones]
+                item.update(milestone_total=total, milestone_omitted=total - len(milestones))
+            projects.append(item)
+        projects.sort(key=lambda item: (item["last_recorded_at"] or "", item["name"]), reverse=True)
+        starts = [p["first_recorded_at"] for p in projects if p["first_recorded_at"]]
+        ends = [p["last_recorded_at"] for p in projects if p["last_recorded_at"]]
+        return {"projects": projects, "range": {"start": min(starts, default=None),
+                                                 "end": max(ends, default=None)},
+                "sampled_at": snap["overview"]["sampled_at"],
+                "project_mode": snap["overview"]["project_mode"], "errors": snap["errors"]}
+
     def _knowledge_projects(self, events, documents, errors):
         """Use curated evidence, not a union of overlapping repository tags."""
         projects, membership, task_projects = {}, {}, {}

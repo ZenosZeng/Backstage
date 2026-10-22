@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="Backstage：项目、共享记忆、文档与运行状态的只读工作台。">
+  <meta name="description" content="Backstage：项目历程、关键节点、文档与运行状态的只读工作台。">
   <title>Backstage · 工作台</title>
   <link rel="icon" href="data:,">
   <script src="theme.js"></script>
@@ -13,21 +13,18 @@
 </head>
 <body>
   <aside class="sidebar">
-    <a class="brand" href="#/overview"><span class="brand-mark">b<span>•</span></span><span>Backstage<span class="brand-caption">YOUR WORK, IN VIEW</span></span></a>
+    <a class="brand" href="#/projects"><span class="brand-mark">b<span>•</span></span><span>Backstage<span class="brand-caption">YOUR WORK, IN VIEW</span></span></a>
     <div class="workspace-switch"><span class="workspace-icon">W</span><div><strong id="workspace-name">工作空间</strong><span id="machine-name">正在读取本机数据</span></div><span class="read-dot"></span></div>
     <div class="nav-label">工作台</div>
     <nav aria-label="主导航">
-      <a href="#/overview" data-nav="overview"><span data-icon="overview"></span>总览</a>
-      <a href="#/projects" data-nav="projects"><span data-icon="projects"></span>项目<span class="nav-count" id="project-count"></span></a>
-      <a href="#/memory" data-nav="memory"><span data-icon="memory"></span>记忆与时间线</a>
-      <a href="#/handoff" data-nav="handoff"><span data-icon="memory"></span>任务交接</a>
-      <a href="#/runtime" data-nav="runtime"><span data-icon="runtime"></span>运行状态</a>
-      <a href="#/documents" data-nav="documents"><span data-icon="documents"></span>文档中心</a>
+      <a href="#/projects" data-nav="projects" aria-label="项目时间线"><span data-icon="overview"></span><span class="nav-text">项目时间线</span><span class="nav-count" id="project-count"></span></a>
+      <a href="#/documents" data-nav="documents" aria-label="项目文档"><span data-icon="documents"></span><span class="nav-text">项目文档</span></a>
+      <a href="#/runtime" data-nav="runtime" aria-label="运行状态"><span data-icon="runtime"></span><span class="nav-text">运行状态</span></a>
     </nav>
     <div class="sidebar-bottom"><div class="local-badge"><span class="status-dot"></span>本机只读工作台</div><p>每个进展，都有来处。</p><div class="sidebar-meta"><span id="version">Backstage</span><span>LOCAL</span></div></div>
   </aside>
   <div class="shell">
-    <header class="topbar"><div class="breadcrumb">工作台<span>/</span><strong id="breadcrumb">总览</strong></div><form id="global-search" role="search"><span data-icon="search"></span><input aria-label="全局搜索记忆" placeholder="搜索记忆、决策、进展…"><kbd>Ctrl K</kbd></form><button class="icon-button" id="theme-toggle" aria-label="切换深浅色模式" title="切换深浅色模式"></button><button class="icon-button" id="refresh" aria-label="刷新数据" title="刷新数据"><span data-icon="refresh"></span></button></header>
+    <header class="topbar"><div class="breadcrumb">工作台<span>/</span><strong id="breadcrumb">项目时间线</strong></div><form id="global-search" role="search"><span data-icon="search"></span><input aria-label="搜索项目" placeholder="搜索项目名称或简介…"><kbd>Ctrl K</kbd></form><button class="icon-button" id="theme-toggle" aria-label="切换深浅色模式" title="切换深浅色模式"></button><button class="icon-button" id="refresh" aria-label="刷新数据" title="刷新数据"><span data-icon="refresh"></span></button></header>
     <main id="content" tabindex="-1"><div class="loading">正在连接工作空间…</div></main>
     <footer><span><span class="status-dot"></span>数据来自现有工作区 · 手动刷新</span><span id="last-read">—</span></footer>
   </div>
