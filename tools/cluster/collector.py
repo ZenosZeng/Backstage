@@ -242,7 +242,10 @@ class BridgeLog:
                 args = (process / "cmdline").read_bytes().decode(errors="replace").split("\0")
                 if ("public" in args and "--port-start" in args
                         and args[args.index("--port-start") + 1] == str(self.port_start) and "--log" in args):
-                    self.pid, self.path = int(process.name), Path(args[args.index("--log") + 1])
+                    path = Path(args[args.index("--log") + 1])
+                    if not path.is_absolute():
+                        path = (process / "cwd").resolve(strict=True) / path
+                    self.pid, self.path = int(process.name), path
                     break
             except (OSError, IndexError):
                 continue

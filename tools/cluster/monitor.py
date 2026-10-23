@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 import copy
+from http.client import HTTPException
 import ipaddress
 import json
 import math
@@ -17,6 +18,7 @@ import statistics
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 
 from tools.cluster.config import settings_fingerprint, validate_config
@@ -33,6 +35,13 @@ def normalized_ip(value):
 
 def percentile(values, fraction):
     return sorted(values)[min(len(values) - 1, math.ceil(len(values) * fraction) - 1)] if values else None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A health check must report the configured endpoint's own response."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Traffic:
@@ -75,7 +84,7 @@ class Traffic:
             source["last_seen"] = now
             source["ports"].append(connection["port"])
             by_port[connection["port"]] += 1
-            if duration is not None and duration <= 30:
+            if duration is not None:
                 old = self.previous.get(key)
                 for field in ("received", "sent"):
                     amount = connection[field] - old[field] if old else connection[field]
@@ -289,7 +298,7 @@ class Monitor:
             return
         started = time.monotonic()
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
             host = f"[{self.public_host}]" if ":" in self.public_host else self.public_host
             request = urllib.request.Request(f"http://{host}:{port}{self.ports['health_path']}",
                                              headers={"User-Agent": "BackstageCluster/1"})
@@ -299,8 +308,11 @@ class Monitor:
                 result = {"port": port, "status": "up" if ok else "down", "http_status": response.status,
                           "latency_ms": round((time.monotonic()-started)*1000, 1),
                           "checked_at": time.time(), "error": None if ok else "健康响应不符合预期"}
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, HTTPException) as error:
             result = {"port": port, "status": "down", "checked_at": time.time(), "error": str(error)[:200]}
+            if isinstance(error, urllib.error.HTTPError):
+                result["http_status"] = error.code
+                error.close()
         with self.lock:
             self.port_health[port] = result
 

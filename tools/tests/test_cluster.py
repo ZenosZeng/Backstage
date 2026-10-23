@@ -337,6 +337,50 @@ def test_bridge_log_emits_only_allowlisted_metadata(tmp_path):
     assert "private payload" not in json.dumps(events)
 
 
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative-log", "absolute-log"])
+def test_bridge_log_auto_uses_bridge_working_directory(tmp_path, monkeypatch, absolute):
+    bridge_cwd, collector_cwd = tmp_path / "bridge", tmp_path / "collector"
+    bridge_cwd.mkdir()
+    collector_cwd.mkdir()
+    log = bridge_cwd / "bridge.jsonl"
+    log.write_text(json.dumps({"event": "prepared_request", "time": 100, "port": 31000}) + "\n")
+    (collector_cwd / log.name).write_text("not the bridge log\n")
+    process = tmp_path / "proc" / "123"
+    process.mkdir(parents=True)
+    path = str(log) if absolute else log.name
+    args = ["python3", "bridge.py", "public", "--port-start", "31000", "--log", path]
+    (process / "cmdline").write_bytes(("\0".join(args) + "\0").encode())
+    if not absolute:
+        (process / "cwd").symlink_to(bridge_cwd, target_is_directory=True)
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda path: iter([process]) if path == Path("/proc") else real_iterdir(path))
+    monkeypatch.setattr(collector.time, "monotonic", lambda: 100)
+    monkeypatch.chdir(collector_cwd)
+
+    events, info = collector.BridgeLog("auto", 31000).read()
+
+    assert info == {"pid": 123, "log_available": True, "log_name": log.name}
+    assert len(events) == 1
+    assert events[0]["port"] == 31000
+
+
+def test_bridge_log_auto_skips_relative_log_when_process_cwd_disappears(tmp_path, monkeypatch):
+    process = tmp_path / "proc" / "123"
+    process.mkdir(parents=True)
+    args = ["python3", "bridge.py", "public", "--port-start", "31000", "--log", "bridge.jsonl"]
+    (process / "cmdline").write_bytes(("\0".join(args) + "\0").encode())
+    (tmp_path / "bridge.jsonl").write_text(json.dumps({"event": "prepared_request", "time": 100}) + "\n")
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda path: iter([process]) if path == Path("/proc") else real_iterdir(path))
+    monkeypatch.setattr(collector.time, "monotonic", lambda: 100)
+    monkeypatch.chdir(tmp_path)
+
+    events, info = collector.BridgeLog("auto", 31000).read()
+
+    assert events == []
+    assert info == {"pid": None, "log_available": False}
+
+
 def test_published_traffic_does_not_share_mutable_sources():
     monitor = Monitor(SETTINGS | {"ports": {"host": "fixture-node", "start": 31000, "end": 31000}})
     connection = {"local_ip": "192.0.2.1", "port": 31000, "peer_ip": "203.0.113.8",
