@@ -3,6 +3,8 @@
 这些是旁路工具，不依赖业务仓库的 Python 环境。watchdog 只读日志、结果 JSON
 和进程/Kubernetes 状态，不启动、停止或修改训练、仿真、推理和评分。
 Claude 飞书遥控是另一项独立服务，不与监控告警共用进程或凭据。
+集群资源由独立的 `cluster-monitor` 采集，经 SSH 读取已配置机器的状态并保存本机快照；
+配置与采集进程独立于业务 watchdog，见 [集群监控说明](cluster/README.md)。
 
 `pixi run web` 启动本机只读工作台，浏览项目、记忆时间线、文档和运行快照；
 没有网页遥控。见 [工作台说明](web/README.md)。
@@ -17,8 +19,8 @@ pixi run watchdog-train
 pixi run tools-status
 ```
 
-两个 watchdog 按需启动，不要求在同一台机器运行。默认后台化，SSH 断开仍运行。
-同名服务只允许一个实例；配置改变需先停止旧实例。无需 sudo、tmux 或业务环境。
+两个 watchdog 和集群采集按需启动，不要求在同一台机器运行。默认后台化，SSH 断开仍运行。
+同名服务只允许一个实例；修改配置后通过 `--restart` 校验并重载。无需 sudo、tmux 或业务环境。
 
 ```bash
 pixi run watchdog-b1k --status
@@ -27,8 +29,9 @@ pixi run watchdog-train --once
 pixi run watchdog-b1k --foreground --no-notify
 ```
 
-三个服务均支持 `--status`、`--stop`、`--once`、`--foreground` 和 `--config PATH`。
+工具服务统一支持 `--status`、`--stop`、`--restart`、`--once`、`--foreground` 和 `--config PATH`。
 `--once` 是无通知、无常驻进程的配置与只读状态检查；遥控的 `--once` 不连接飞书或运行 Claude。
+集群采集的 `--once` 只校验配置、读取已有快照，不连接 SSH、不探活端口；开始采集需显式启动服务。
 `--no-notify` 仅禁用 watchdog 消息，不是暂停遥控指令的开关。
 PID 身份通过启动时间、命令、工作目录核验；不会用宽泛 `pkill` 停止其他服务。
 
@@ -42,6 +45,7 @@ PID 身份通过启动时间、命令、工作目录核验；不会用宽泛 `pk
 |---|---|
 | watchdog-b1k | `repo_root`、`log`、`eval_config` |
 | watchdog-train | `repo_root`、`log_root`、`kubectl_args`、`experiments`、`native_runs` |
+| cluster-monitor | 必填 `hosts`；可选 `interval_seconds`、`health_interval_seconds`、`ports`，见 [字段说明](cluster/README.md#本机配置) |
 | claude-feishu | `credentials_file`、`workdir`、`claude_cli`、`dsh_cli`、`claude_model_name`、`dsh_model_name`、`timeout_seconds`、`dsh_timeout_seconds`、`permission_profile` |
 
 B1K 默认查找 `scripts/eval/{fleet,0srv16sim,2srv14sim,8srv8sim}/eval.log` 中最新日志。
@@ -163,7 +167,10 @@ pixi run claude-feishu --stop
 `service.log` 的 `Feishu websocket connected` 表示 SDK 已完成连接，不打印带签名的连接 URL。
 
 核心代码、模板与 Pixi lock 走 Git；凭据、日志、PID、游标仅本机；Memory/Skill/项目资料沿用 S3。
-当前仅迁移 Pi 训练和 B1K 评测 watchdog，GOAI 的独立 watchdog 不在本轮范围内。
+集群监控的私有配置、快照、SSH 配置与密钥均仅本机，不通过 Git/S3 发布。
+旧独立 `cluster-monitor` 的切换须先停止旧采集，再启动 Backstage 采集，避免重复采样；
+原仓库保留历史、不删除，后续代码维护以 Backstage `tools/cluster/` 为入口，见 [迁移说明](cluster/README.md#从独立-cluster-monitor-迁移)。
+Pi 训练和 B1K 评测沿用现有 watchdog，GOAI 的独立 watchdog 不在本轮范围内。
 
 ## 验证
 

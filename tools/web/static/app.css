@@ -427,3 +427,13 @@ nav a{font-size:14px}.workspace-switch strong{font-size:14px}.workspace-switch d
 
 .gantt-ticks>span[hidden]{display:none}
 @media(max-width:650px){.gantt-grid[data-fit="true"] .gantt-date{display:none}}
+
+/* Stronger type and secondary text contrast for sustained reading. */
+:root { font-weight: 500; font-synthesis: weight; }
+:root[data-theme="dark"] { --muted: #aebbb3; }
+:root[data-theme="light"] { --muted: #526477; }
+button,input,select { font-weight: 600; }
+.sidebar .nav-text,.runtime-tabs a,.breadcrumb strong { font-weight: 600; }
+h1,h2,h3,.journey-heading h1,.journey-project-head h1,
+.section-heading h2,.panel-heading h2,.journey-section-heading h2,
+.gantt-label strong,.milestone-body h3,.journey-task-summary h2,.journey-task-summary h3 { font-weight: 700; }

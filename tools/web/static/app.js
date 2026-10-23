@@ -1,8 +1,10 @@
+import {mountCluster} from './cluster.js';
+
 const $ = (s, root = document) => root.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = n => new Intl.NumberFormat('zh-CN').format(n || 0);
 const when = value => value ? new Date(value).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '暂无记录';
-const labels = {projects:'项目时间线',documents:'项目文档',runtime:'运行状态'};
+const labels = {projects:'项目时间线',documents:'项目文档',runtime:'监控'};
 const types = {decision:'决策',fact:'事实',progress:'进展',bugfix:'修复',risk:'风险',hypothesis:'待验证',test_result:'验证',config:'配置',preference:'偏好'};
 const states = {active:'进行中',paused:'已暂停',closed:'已关闭',unknown:'状态未声明',conflict:'状态有冲突'};
 const paths = {
@@ -33,7 +35,7 @@ $('#theme-toggle').addEventListener('click', () => {
   localStorage.setItem('backstage.theme', theme);
   updateThemeButton();
 });
-let overview, renderEpoch = 0, eventEpoch = 0;
+let overview, renderEpoch = 0, eventEpoch = 0, runtimeCleanup = ()=>{};
 const content = $('#content');
 function route() { const [name, query] = location.hash.replace(/^#\/?/, '').split('?'); const params=new URLSearchParams(query); if(name==='memory' && params.get('business')) params.set('name',params.get('business')); return {name:labels[name] ? name : 'projects', params}; }
 function href(name, params = {}) { return `#/${name}?${new URLSearchParams(Object.entries(params).filter(([,v])=>v !== '' && v != null))}`; }
@@ -48,8 +50,8 @@ function heading(kicker, title, description, action = '') { return `<div class="
 function tag(text, color = '') { return `<span class="tag ${color}">${escape(text)}</span>`; }
 function taskTag(state) { return tag(states[state] || state, state === 'active' ? 'green' : state === 'conflict' ? 'amber' : ''); }
 function serviceCards(items) {
-  const names = {'claude-feishu':'Feishu Bridge','watchdog-train':'训练监控','watchdog-b1k':'B1K 评测监控'};
-  return items.map(s => `<div class="service-card"><div class="service-top"><span class="service-icon">${icon(s.name === 'claude-feishu' ? 'memory' : 'runtime')}</span>${tag(s.running ? (s.ready ? '就绪' : '进程运行中') : '未运行', s.running && s.ready ? 'green' : '')}</div><h3>${names[s.name]}</h3><p>${s.running ? `PID ${s.pid} · ${s.name === 'claude-feishu' ? (s.ready ? 'WebSocket 已连接' : '连接未就绪') : '本机监控进程'}` : s.configured ? '本机已有配置，当前进程未运行' : '本机未发现运行进程'}</p>${s.running ? `<p class="service-version">启动版本：${escape(s.code_at_start?.version || '未知（旧记录）')}<br><code>${escape(s.code_at_start?.commit?.slice(0,12) || '无启动提交记录')}</code><br>${s.code_changed === true ? '启动后源码已变化' : s.code_changed === false ? '与本机源码版本一致' : '版本差异待核对'}</p>` : ''}</div>`).join('');
+  const names = {'claude-feishu':'Feishu Bridge','watchdog-train':'训练监控','watchdog-b1k':'B1K 评测监控','cluster-monitor':'集群资源采集'};
+  return items.map(s => `<div class="service-card"><div class="service-top"><span class="service-icon">${icon(s.name === 'claude-feishu' ? 'memory' : 'runtime')}</span>${tag(s.running ? (s.ready ? '就绪' : '进程运行中') : '未运行', s.running && s.ready ? 'green' : '')}</div><h3>${escape(names[s.name] || s.name)}</h3><p>${s.running ? `PID ${s.pid} · ${s.name === 'claude-feishu' ? (s.ready ? 'WebSocket 已连接' : '连接未就绪') : s.name === 'cluster-monitor' ? '集群资源采集进程' : '本机监控进程'}` : s.configured ? '本机已有配置，当前进程未运行' : '本机未发现运行进程'}</p>${s.running ? `<p class="service-version">启动版本：${escape(s.code_at_start?.version || '未知（旧记录）')}<br><code>${escape(s.code_at_start?.commit?.slice(0,12) || '无启动提交记录')}</code><br>${s.code_changed === true ? '启动后源码已变化' : s.code_changed === false ? '与本机源码版本一致' : '版本差异待核对'}</p>` : ''}</div>`).join('');
 }
 const dayMs = 86400000;
 const dateLabel = value => value ? new Intl.DateTimeFormat('zh-CN',{timeZone:'UTC',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value)) : '暂无时间记录';
@@ -143,7 +145,7 @@ async function showProjects(params, epoch) {
   $('.journey-task-board')?.addEventListener('toggle',positionGantt);
   $('#task-picker select')?.addEventListener('change',e=>{location.hash=href('projects',{name,scale:mode,task:e.target.value});});
   positionGantt();
-  if(data.errors.length) content.insertAdjacentHTML('afterbegin','<p class="data-warning">部分来源数据无效，项目历程可能不完整；请在运行状态中查看工作区自检。</p>');
+  if(data.errors.length) content.insertAdjacentHTML('afterbegin','<p class="data-warning">部分来源数据无效，项目历程可能不完整；请在监控的本机服务中查看工作区自检。</p>');
 }
 async function showDocuments(params, epoch) {
   const business=params.get('business');
@@ -175,25 +177,46 @@ function doctorDetails(data) {
   return `<div class="doctor-evidence"><h3>本机源码与 Skill</h3><p>工作区核心：${escape(code.version || '未知')} · ${code.dirty === true ? '有未提交改动' : code.dirty === false ? '源码干净' : '改动状态未知'}<br><code>${escape(code.commit || '未读取到 Git 提交')}</code></p><p class="panel-hint">${data.skills.map(s=>`${escape(s.name)}：最低版本 ${escape(s.minimum_version || '未声明')}（${escape({compatible:'满足版本声明',outdated:'核心版本过旧',unknown:'兼容性未知',invalid:'声明无效',unreadable:'不可读'}[s.state] || s.state)}）`).join('<br>') || '暂无可检查的 Skill'}</p></div><details class="health-details"><summary>记忆健康明细 · ${Object.values(health.counts).reduce((a,b)=>a+b,0)} 项候选</summary><p class="panel-hint">检查 ${health.checked_events} 条记忆；超过 ${health.stale_days} 天的进展、风险与假设可能需要重新核对。候选问题不代表记录失效。</p><div class="health-list">${health.items.map(item=>`<${item.event_id ? `button data-event="${escape(item.event_id)}"` : 'div'} class="health-record"><strong>${escape(item.label)}</strong><span>${escape(item.title || item.detail || item.task_id || '核对 memory validate / audit')}</span>${item.source ? `<code>${escape(item.source)}</code>` : ''}</${item.event_id ? 'button' : 'div'}>`).join('') || '<p class="panel-hint">未发现审计候选问题。</p>'}</div>${health.omitted ? `<p class="panel-hint">另 ${health.omitted} 项请用 memory audit 查看。</p>` : ''}</details>`;
 }
 async function showRuntime(params, epoch) {
-  const services = await api('services');
-  if (epoch !== renderEpoch) return;
-  content.innerHTML = heading('LOCAL RUNTIME SNAPSHOT','本机运行快照。','读取本机服务与已配置监控。更新时间表示本次读取，不代表远端机器在线。',`<span class="date-chip">${icon('clock')}读取于 ${when(services.read_at)}</span>`) + `<div class="runtime-scope"><span>范围：本机</span><span>工具核心 ${escape(services.installed_code.version || '版本未知')} · ${escape(services.installed_code.commit?.slice(0,12) || '提交未知')}</span><span>来源：本机进程核验与服务 PID 记录</span><span>采样时间：${when(services.sampled_at)}</span></div><div class="services-grid">${serviceCards(services.items)}</div><div class="section-heading"><h2>训练与评测</h2><span class="muted">只读快照 · 手动刷新</span></div><div class="monitor-grid">${[['train','训练 / 离线评测','TRAINING'],['b1k','B1K 评测','EVALUATION']].map(([kind,title,label])=>`<section class="panel monitor-panel"><div class="panel-heading"><h2>${title}</h2><span>${label}</span></div><div id="monitor-${kind}" class="loading">正在读取已配置监控…</div></section>`).join('')}</div><div class="section-heading"><h2>记忆来源机器</h2><span class="muted">这是事件最后记录时间，不是在线探测</span></div><div class="machines-grid">${overview.machines.map(m=>`<div class="machine-card"><span class="machine-symbol">${icon('overview')}</span><strong>${escape(m.name)}</strong><span>最后事件 ${when(m.last_event_at)}</span></div>`).join('')}</div>`;
-  content.insertAdjacentHTML('beforeend','<section class="panel doctor-panel"><div class="panel-heading"><h2>工作区自检</h2><span>本机只读 · 不连接远端</span></div><div id="doctor-results" class="loading">正在检查配置、记忆与链接…</div></section>');
-  const doctorRequest = api('doctor').then(data=>{
-    if(epoch !== renderEpoch) return;
-    $('#doctor-results').className='doctor-checks';
-    $('#doctor-results').innerHTML=data.checks.map(c=>`<div class="doctor-check">${tag({ok:'通过',warning:'待核对',error:'有错误',unconfigured:'未配置'}[c.state],c.state==='ok'?'green':c.state==='error'||c.state==='warning'?'amber':'')}<div><strong>${escape(c.name)}</strong><p>${escape(c.detail)}</p>${c.hint ? `<small>${escape(c.hint)}</small>`:''}</div></div>`).join('')+doctorDetails(data)+`<p class="panel-hint">${escape(data.notice)} · ${when(data.sampled_at)}<br>本机状态来源：${escape(data.local_root)}<br>各机器最后记忆时间见上方列表。</p>`;
-  }).catch(error=>{if(epoch === renderEpoch) $('#doctor-results').innerHTML=`<p class="inline-error">${escape(error.message)}</p>`;});
+  const tab=['cluster','train','services'].includes(params.get('tab'))?params.get('tab'):'cluster';
+  const titles={cluster:['CLUSTER RESOURCES','集群资源。','每台机器、每张 GPU，以及已配置入口的采集快照。'],train:['TRAINING & EVALUATION','训练与评测。','读取已配置监控的本机快照，按需手动刷新。'],services:['LOCAL SERVICES','本机服务。','核对服务进程、启动版本与工作区健康状态。']};
+  content.innerHTML=`<div class="runtime-view">${heading(...titles[tab])}<nav class="runtime-tabs" aria-label="监控分类">${[['cluster','集群资源'],['train','训练与评测'],['services','本机服务']].map(([value,label])=>`<a class="${tab===value?'selected':''}" href="${href('runtime',{tab:value})}" ${tab===value?'aria-current="page"':''}>${label}</a>`).join('')}</nav><div class="runtime-content" id="runtime-content"></div></div>`;
+  if(tab==='cluster') {
+    runtimeCleanup=mountCluster($('#runtime-content'),{isCurrent:()=>epoch===renderEpoch,onRead:data=>{
+      if(epoch!==renderEpoch) return;
+      const sampled=data.sampled_at?new Date(data.sampled_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'暂无采样';
+      $('#last-read').textContent=`集群采样 ${sampled}（北京时间） · ${data.collector_running?'每 3 秒读取快照':'采集未运行'}`;
+    }});
+    return;
+  }
+  if(tab==='services') return showLocalServices(epoch);
+  $('#runtime-content').innerHTML=`<div class="runtime-scope"><span>范围：已配置的本机监控</span><span>手动读取 · 不启停训练或评测</span></div><div class="monitor-grid">${[['train','训练 / 离线评测','TRAINING'],['b1k','B1K 评测','EVALUATION']].map(([kind,title,label])=>`<section class="panel monitor-panel"><div class="panel-heading"><h2>${title}</h2><span>${label}</span></div><div id="monitor-${kind}" class="loading">正在读取已配置监控…</div></section>`).join('')}</div>`;
   await Promise.all(['train','b1k'].map(async kind=>{
     try {
       const data=await api('monitor',{kind});
-      if (epoch !== renderEpoch) return;
-      $(`#monitor-${kind}`).className='monitor-content';
-      $(`#monitor-${kind}`).innerHTML=data.error ? `<div class="inline-error">${escape(data.error)}</div>` : !data.configured ? `<div class="monitor-empty"><span class="muted-dot status-dot"></span><h3>尚未配置</h3><p>添加现有 watchdog 配置后，可在这里读取状态。</p></div>` : `<pre class="monitor-status">${escape(data.status || '本次采集未返回活跃任务详情。')}</pre>`;
-      $(`#monitor-${kind}`).insertAdjacentHTML('beforeend',`<div class="sample-meta"><span>范围：本机 · ${escape({available:'有采集结果',unconfigured:'未配置',unavailable:'不可用',no_data:'无数据'}[data.state] || '状态未知')}</span><span>采样时间：${when(data.sampled_at)}</span><span>来源：${escape(data.collector)}</span><code>${escape(data.source)}</code></div>`);
-    } catch(error) { if(epoch === renderEpoch) { $(`#monitor-${kind}`).className='monitor-content'; $(`#monitor-${kind}`).innerHTML=`<div class="inline-error">${escape(error.message)}</div>`; } }
+      if(epoch!==renderEpoch) return;
+      const panel=$(`#monitor-${kind}`);
+      panel.className='monitor-content';
+      panel.innerHTML=data.error?`<div class="inline-error">${escape(data.error)}</div>`:!data.configured?`<div class="monitor-empty"><span class="muted-dot status-dot"></span><h3>尚未配置</h3><p>接入现有 watchdog 配置后，可在这里读取状态。</p></div>`:`<pre class="monitor-status">${escape(data.status || '本次采集未返回活跃任务详情。')}</pre>`;
+      panel.insertAdjacentHTML('beforeend',`<div class="sample-meta"><span>范围：本机 · ${escape({available:'有采集结果',unconfigured:'未配置',unavailable:'不可用',no_data:'无数据'}[data.state] || '状态未知')}</span><span>采样时间：${when(data.sampled_at)}</span><span>来源：${escape(data.collector)}</span><code>${escape(data.source)}</code></div>`);
+    } catch(error) {
+      if(epoch===renderEpoch) {$(`#monitor-${kind}`).className='monitor-content';$(`#monitor-${kind}`).innerHTML=`<div class="inline-error">${escape(error.message)}</div>`;}
+    }
   }));
-  await doctorRequest;
+  if(epoch===renderEpoch) $('#last-read').textContent='训练与评测 · 本机只读快照 · 手动刷新';
+}
+async function showLocalServices(epoch) {
+  const services=await api('services');
+  if(epoch!==renderEpoch) return;
+  $('#last-read').textContent=`本机服务采样 ${when(services.sampled_at)} · 手动刷新`;
+  $('#runtime-content').innerHTML=`<div class="runtime-scope"><span>范围：本机</span><span>工具核心 ${escape(services.installed_code.version || '版本未知')} · ${escape(services.installed_code.commit?.slice(0,12) || '提交未知')}</span><span>来源：本机进程核验与服务 PID 记录</span><span>采样时间：${when(services.sampled_at)}</span></div><div class="services-grid">${serviceCards(services.items)}</div><div class="section-heading"><h2>记忆来源机器</h2><span class="muted">最后记录时间，不是在线探测</span></div><div class="machines-grid">${overview.machines.map(m=>`<div class="machine-card"><span class="machine-symbol">${icon('overview')}</span><strong>${escape(m.name)}</strong><span>最后事件 ${when(m.last_event_at)}</span></div>`).join('')}</div><section class="panel doctor-panel"><div class="panel-heading"><h2>工作区自检</h2><span>本机只读 · 不连接远端</span></div><div id="doctor-results" class="loading">正在检查配置、记忆与链接…</div></section>`;
+  try {
+    const data=await api('doctor');
+    if(epoch!==renderEpoch) return;
+    $('#doctor-results').className='doctor-checks';
+    $('#doctor-results').innerHTML=data.checks.map(c=>`<div class="doctor-check">${tag({ok:'通过',warning:'待核对',error:'有错误',unconfigured:'未配置'}[c.state],c.state==='ok'?'green':c.state==='error'||c.state==='warning'?'amber':'')}<div><strong>${escape(c.name)}</strong><p>${escape(c.detail)}</p>${c.hint?`<small>${escape(c.hint)}</small>`:''}</div></div>`).join('')+doctorDetails(data)+`<p class="panel-hint">${escape(data.notice)} · ${when(data.sampled_at)}<br>本机状态来源：${escape(data.local_root)}<br>各机器最后记忆时间见上方列表。</p>`;
+  } catch(error) {
+    if(epoch===renderEpoch) $('#doctor-results').innerHTML=`<p class="inline-error">${escape(error.message)}</p>`;
+  }
 }
 async function openEvent(id) {
   const dialog=$('#event-dialog'), epoch=++eventEpoch;
@@ -208,6 +231,7 @@ async function openEvent(id) {
   } catch(error) { if(epoch === eventEpoch && dialog.open) $('#event-detail').innerHTML=`<p class="inline-error">${escape(error.message)}</p>`; }
 }
 async function render() {
+  runtimeCleanup();runtimeCleanup=()=>{};
   const epoch=++renderEpoch, {name,params}=route();
   ++eventEpoch;
   window.scrollTo(0,0);
@@ -238,5 +262,7 @@ $('#global-search').addEventListener('submit',e=>{e.preventDefault();location.ha
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#global-search input').focus();}});
 $('#refresh').addEventListener('click',()=>{overview=null;render();});
 window.addEventListener('hashchange',render);
+window.addEventListener('pagehide',()=>runtimeCleanup());
+window.addEventListener('pageshow',event=>{if(event.persisted) render();});
 window.addEventListener('resize',positionGantt);
 render();

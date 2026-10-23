@@ -1,0 +1,8 @@
+{
+  "hosts": [
+    {"alias": "gpu-node-a", "label": "GPU 节点 A", "group": "GPU"},
+    {"alias": "gpu-node-b", "label": "GPU 节点 B", "group": "GPU"}
+  ],
+  "interval_seconds": 5,
+  "health_interval_seconds": 30
+}

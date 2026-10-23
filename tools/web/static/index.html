@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="Backstage：项目历程、关键节点、文档与运行状态的只读工作台。">
+  <meta name="description" content="Backstage：项目历程、关键节点、文档、集群资源与运行状态的只读工作台。">
   <title>Backstage · 工作台</title>
   <link rel="icon" href="data:,">
   <script src="theme.js"></script>
   <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="cluster.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -19,7 +20,7 @@
     <nav aria-label="主导航">
       <a href="#/projects" data-nav="projects" aria-label="项目时间线"><span data-icon="overview"></span><span class="nav-text">项目时间线</span><span class="nav-count" id="project-count"></span></a>
       <a href="#/documents" data-nav="documents" aria-label="项目文档"><span data-icon="documents"></span><span class="nav-text">项目文档</span></a>
-      <a href="#/runtime" data-nav="runtime" aria-label="运行状态"><span data-icon="runtime"></span><span class="nav-text">运行状态</span></a>
+      <a href="#/runtime" data-nav="runtime" aria-label="监控"><span data-icon="runtime"></span><span class="nav-text">监控</span></a>
     </nav>
     <div class="sidebar-bottom"><div class="local-badge"><span class="status-dot"></span>本机只读工作台</div><p>每个进展，都有来处。</p><div class="sidebar-meta"><span id="version">Backstage</span><span>LOCAL</span></div></div>
   </aside>

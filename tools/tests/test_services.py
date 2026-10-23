@@ -54,6 +54,23 @@ def test_pid_reuse_and_unrelated_process_are_rejected(tmp_path):
         kill.assert_not_called()
 
 
+@pytest.mark.parametrize("command,expected", [
+    (b"python\0-m\0tools.cluster\0--foreground\0", True),
+    (b"python\0-m\0tools.watchdog\0cluster-monitor\0--foreground\0", False),
+    (b"python\0-m\0tools.cluster\0--once\0", False),
+    (b"python\0app.py\0--foreground\0", False),
+])
+def test_cluster_service_requires_its_own_module_and_foreground_identity(tmp_path, monkeypatch, command, expected):
+    pid = os.getpid()
+    atomic_json(tmp_path / "pid.json", {
+        "name": "cluster-monitor", "pid": pid,
+        "start_ticks": service.process_start(pid), "root": str(ROOT),
+    })
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(service.Path, "read_bytes", lambda self: command)
+    assert bool(service.running_record(tmp_path, "cluster-monitor")) is expected
+
+
 def test_sandbox_unreadable_cwd_keeps_a_live_process_visible(tmp_path, monkeypatch):
     """回归：沙箱拒绝读 /proc/<pid>/cwd 时，不能把活着的服务判成已停止。
 
