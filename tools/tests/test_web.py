@@ -122,7 +122,7 @@ def test_svg_is_sandboxed_and_static_assets_are_served(server):
     with urlopen(server + "/api/asset?path=.share/knowledge/chart.svg") as response:
         assert "sandbox" in response.headers["Content-Security-Policy"]
         assert response.headers["Content-Type"] == "image/svg+xml"
-    for path in ("/", "/app.js", "/app.css", "/theme.js"):
+    for path in ("/", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css"):
         with urlopen(server + path) as response:
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
@@ -155,6 +155,117 @@ def test_monitor_uses_existing_once_without_notifications(workspace, monkeypatch
     assert calls[0][1]["env"]["AGENTS_LOCAL_ROOT"] == str(workspace.local)
     assert config.read_bytes() == before
     assert workspace.monitor("b1k")["configured"] is False
+
+
+def cluster_fixture(workspace, *, at=1000, state="collecting"):
+    from tools.cluster.config import settings_fingerprint
+    from tools.config import atomic_json
+
+    config = {"hosts": [{"alias": "gpu-test", "label": "测试节点", "group": "GPU"}]}
+    atomic_json(workspace.local / "config/cluster-monitor.json", config)
+    snapshot = {
+        "schema_version": 1, "state": state, "config_hash": settings_fingerprint(config),
+        "time": at, "interval": 5, "health_interval": 30,
+        "nodes": [{"alias": "gpu-test", "label": "测试节点", "group": "GPU", "status": "online",
+                   "received_at": at, "sample": {"sampled_at": at, "cpu_percent": 25}, "history": [], "error": None}],
+        "summary": {"nodes": 1, "online": 1, "gpus": 0}, "ports": None,
+    }
+    path = workspace.local / "tools/cluster-monitor/snapshot.json"
+    atomic_json(path, snapshot)
+    return config, path, snapshot
+
+
+def test_cluster_http_only_reads_selected_local_files(server, workspace, monkeypatch):
+    from tools import service
+    from tools.web import data
+
+    _, path, _ = cluster_fixture(workspace)
+    monkeypatch.setattr(data.time, "time", lambda: 1001)
+    monkeypatch.setattr(service, "running_record", lambda *_: {"pid": 123})
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("HTTP must not start SSH, probes, or a service")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    before = {p: p.read_bytes() for p in workspace.local.rglob("*") if p.is_file()}
+    result = fetch(server, "/api/cluster")
+    assert result["configured"] and result["collector_running"]
+    assert result["state"] == "available" and result["scope"] == "cluster"
+    assert result["source"] == str(path)
+    assert result["sampled_at"] != result["read_at"]
+    assert result["snapshot"]["nodes"][0]["label"] == "测试节点"
+    assert before == {p: p.read_bytes() for p in workspace.local.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("running,age,state,expected", [
+    (True, 1, "collecting", "available"),
+    (False, 1, "collecting", "stale"),
+    (True, 21, "collecting", "stale"),
+    (True, -10, "collecting", "stale"),
+    (True, 1, "stopped", "stale"),
+])
+def test_cluster_never_reports_stopped_or_expired_snapshot_as_live(workspace, monkeypatch, running, age, state, expected):
+    from tools import service
+    from tools.web import data
+
+    _, path, _ = cluster_fixture(workspace, state=state)
+    before = path.read_bytes()
+    monkeypatch.setattr(data.time, "time", lambda: 1000 + age)
+    monkeypatch.setattr(service, "running_record", lambda *_: {"pid": 123} if running else None)
+    result = workspace.cluster()
+    assert result["state"] == expected
+    assert result["collector_running"] is running
+    assert result["snapshot"]["nodes"][0]["status"] == ("online" if expected == "available" else "stale")
+    assert result["snapshot"]["nodes"][0]["sample"]["cpu_percent"] == 25
+    assert path.read_bytes() == before  # ageing a read never rewrites the collector's file
+
+
+def test_cluster_missing_invalid_and_changed_config_are_distinct(workspace, monkeypatch):
+    from tools import service
+    from tools.config import atomic_json
+
+    assert workspace.cluster()["state"] == "unconfigured"
+    monkeypatch.setattr(service, "running_record", lambda *_: None)
+    config, path, snapshot = cluster_fixture(workspace)
+    path.unlink()
+    assert workspace.cluster()["state"] == "unavailable"
+    monkeypatch.setattr(service, "running_record", lambda *_: {"pid": 123})
+    assert workspace.cluster()["state"] == "no_data"
+    path.write_text("not JSON")
+    assert workspace.cluster()["state"] == "unavailable"
+    atomic_json(path, snapshot)
+    config["hosts"][0]["alias"] = "another-node"
+    atomic_json(workspace.local / "config/cluster-monitor.json", config)
+    result = workspace.cluster()
+    assert result["state"] == "no_data" and result["snapshot"] is None
+    assert "需重启" in result["status"]
+    atomic_json(workspace.local / "config/cluster-monitor.json", {"hosts": []})
+    assert workspace.cluster()["state"] == "unavailable"
+
+
+def test_cluster_does_not_read_another_local_root(workspace, tmp_path, monkeypatch):
+    from tools import service
+    from tools.web import data
+
+    _, path, _ = cluster_fixture(workspace)
+    alternate = Workspace(workspace.root, tmp_path / "alternate-local")
+    assert alternate.cluster()["state"] == "unconfigured"
+    config, _, snapshot = cluster_fixture(alternate)
+    snapshot["nodes"][0]["sample"]["cpu_percent"] = 73
+    from tools.config import atomic_json
+    atomic_json(alternate.local / "tools/cluster-monitor/snapshot.json", snapshot)
+    monkeypatch.setattr(data.time, "time", lambda: 1001)
+    monkeypatch.setattr(service, "running_record", lambda *_: {"pid": 123})
+    assert alternate.cluster()["snapshot"]["nodes"][0]["sample"]["cpu_percent"] == 73
+    assert json.loads(path.read_text())["nodes"][0]["sample"]["cpu_percent"] == 25
+
+
+def test_cluster_api_preserves_host_and_read_only_boundaries(server):
+    with pytest.raises(HTTPError) as exc:
+        urlopen(Request(server + "/api/cluster", headers={"Host": "attacker.example"}))
+    assert exc.value.code == 403
+    with pytest.raises(HTTPError) as exc:
+        urlopen(Request(server + "/api/cluster", data=b"{}", method="POST"))
+    assert exc.value.code == 405
 
 
 def test_train_collection_error_is_unavailable_not_empty(workspace, monkeypatch, tmp_path):

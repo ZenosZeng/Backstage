@@ -80,13 +80,15 @@ class Handler(BaseHTTPRequestHandler):
                 data = workspace.services()
             elif url.path == "/api/monitor":
                 data = workspace.monitor(query["kind"])
+            elif url.path == "/api/cluster":
+                data = workspace.cluster()
             elif url.path == "/api/asset":
                 path = workspace.document_path(query["path"])
                 if path.suffix.lower() == ".md":
                     raise PermissionError("请使用文档预览入口")
                 self.respond(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream", svg=path.suffix.lower() == ".svg")
                 return
-            elif url.path in {"/", "/index.html", "/app.js", "/app.css", "/theme.js"}:
+            elif url.path in {"/", "/index.html", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css"}:
                 path = STATIC / (url.path.lstrip("/") or "index.html")
                 self.respond(200, path.read_bytes(), (mimetypes.guess_type(path.name)[0] or "text/plain") + "; charset=utf-8")
                 return

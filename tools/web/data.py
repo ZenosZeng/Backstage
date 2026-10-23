@@ -436,3 +436,55 @@ class Workspace:
         data.update(sampled_at=timestamp(datetime.now().timestamp()))
         data["read_at"] = data["sampled_at"]
         return data
+
+    def cluster(self):
+        """Read the collector's local snapshot; HTTP requests never start probes."""
+        from tools.cluster.config import read_snapshot, settings_fingerprint
+
+        directory = self.local / "tools" / "cluster-monitor"
+        config = self.local / "config" / "cluster-monitor.json"
+        now = time.time()
+        data = {
+            "configured": config.is_file(), "scope": "cluster",
+            "source": str(directory / "snapshot.json"),
+            "read_at": timestamp(now), "sampled_at": None,
+            "collector_running": False, "snapshot": None,
+        }
+        if not data["configured"]:
+            return data | {"state": "unconfigured", "status": "本机尚未配置集群监控"}
+        try:
+            fingerprint = settings_fingerprint(json.loads(config.read_text()))
+        except (OSError, ValueError, TypeError):
+            return data | {"state": "unavailable", "error": "集群监控配置无效或不可读"}
+        record = service.running_record(directory, "cluster-monitor")
+        data["collector_running"] = bool(record)
+        try:
+            snapshot = read_snapshot(directory)
+        except FileNotFoundError:
+            return data | {
+                "state": "no_data" if record else "unavailable",
+                "status": "采集器正在等待首轮快照" if record else "采集器未运行，暂无集群快照",
+            }
+        except (OSError, ValueError):
+            return data | {"state": "unavailable", "error": "集群快照无效或不可读，请检查采集器日志"}
+        if snapshot["config_hash"] != fingerprint:
+            return data | {"state": "no_data", "status": "配置已变化，需重启集群采集器才能应用新配置"}
+        age = now - snapshot["time"]
+        fresh = (-5 <= age <= snapshot["interval"] * 3 + 5
+                 and bool(record) and snapshot["state"] == "collecting")
+        has_sample = any(node.get("sample") is not None for node in snapshot["nodes"])
+        if not fresh:
+            for node in snapshot["nodes"]:
+                if node.get("sample") is not None:
+                    node["status"] = "stale"
+            if snapshot.get("ports"):
+                snapshot["ports"]["traffic_stale"] = True
+        data.update(snapshot=snapshot, sampled_at=timestamp(snapshot["time"]))
+        if not has_sample:
+            return data | {"state": "no_data", "status": "尚未收到节点数据，请查看节点连接状态"}
+        if not fresh or not any(node.get("status") == "online" for node in snapshot["nodes"]):
+            return data | {
+                "state": "stale",
+                "status": "采集器未运行，显示最后快照" if not record else "采集数据已过期，显示最后读数",
+            }
+        return data | {"state": "available", "status": "集群资源只读采样"}

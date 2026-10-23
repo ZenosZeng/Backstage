@@ -22,7 +22,13 @@ from tools.config import ROOT, atomic_json, load_config, local_root
 from scripts.doctor import code_identity
 
 
-SERVICES = ("watchdog-b1k", "watchdog-train", "claude-feishu")
+SERVICE_COMMANDS = {
+    "watchdog-b1k": ("tools.watchdog", "b1k"),
+    "watchdog-train": ("tools.watchdog", "train"),
+    "claude-feishu": ("tools.claude_feishu",),
+    "cluster-monitor": ("tools.cluster",),
+}
+SERVICES = tuple(SERVICE_COMMANDS)
 CODE_AT_START = code_identity(ROOT)
 
 
@@ -53,11 +59,9 @@ def running_record(directory: Path, name: str) -> dict | None:
         if process_start(pid) != record["start_ticks"]:
             return None
         command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        expected = (
-            [b"-m", b"tools.claude_feishu"]
-            if name == "claude-feishu"
-            else [b"-m", b"tools.watchdog", name.removeprefix("watchdog-").encode()]
-        )
+        if name not in SERVICE_COMMANDS:
+            return None
+        expected = [b"-m", *(part.encode() for part in SERVICE_COMMANDS[name])]
         if not any(
             command[i : i + len(expected)] == expected for i in range(len(command))
         ):
