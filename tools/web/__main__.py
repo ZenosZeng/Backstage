@@ -73,7 +73,9 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/document":
                 data = workspace.document(query["path"])
             elif url.path == "/api/handoff":
-                data = workspace.handoff(query["task"], query.get("limit", 5))
+                data = workspace.handoff(query["task"], query.get("limit", 5), query.get("to_agent"))
+            elif url.path == "/api/review":
+                data = workspace.review(query["task"], query.get("limit", 20), query.get("max_chars", 12000))
             elif url.path == "/api/doctor":
                 data = workspace.doctor()
             elif url.path == "/api/services":

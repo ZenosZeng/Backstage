@@ -18,7 +18,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
-from scripts import memory, retrieval
+from scripts import knowledge, memory, memory_review, retrieval, task_context
 from tools import service
 from tools.config import ROOT
 
@@ -71,6 +71,9 @@ class Workspace:
             tasks = {}
         replaced = {key for event in events for key in event.get("supersedes", [])}
         documents = self._scan_documents()
+        freshness = knowledge.freshness_index(self.root, documents, events, config)
+        for document in documents:
+            document["freshness"] = freshness.get(document["path"], {})
         projects, membership = self._knowledge_projects(events, documents, errors)
         repositories = {}
         for name, item in config.get("projects", {}).items():
@@ -128,6 +131,7 @@ class Workspace:
             "errors": errors,
         }
         return dict(config=config, events=events, sources=sources, tasks=tasks, replaced=replaced,
+                    freshness=freshness,
                     errors=errors, documents=documents, projects=projects, membership=membership, overview=overview)
 
     def overview(self):
@@ -143,8 +147,11 @@ class Workspace:
             raise FileNotFoundError("项目不存在")
         selected = {project: available[project]} if project else available
         grouped = {name: [] for name in selected}
+        current_by_task = {}
         knowledge = bool(snap["projects"])
         for event in snap["events"]:
+            if event["event_id"] not in snap["replaced"] and event["status"] != "superseded":
+                current_by_task.setdefault(event.get("task_id"), []).append(event)
             names = snap["membership"].get(event["event_id"], ()) if knowledge else (
                 item["name"] for item in event["projects"]
             )
@@ -158,13 +165,14 @@ class Workspace:
         def bounds(events):
             return (at(events[0]), at(events[-1])) if events else (None, None)
 
-        projects = []
+        projects, project_tasks = [], {}
         for name, metadata in selected.items():
             events = grouped[name]  # The shared snapshot is already sorted in UTC.
             by_task = {}
             for event in events:
                 if event.get("task_id") not in (None, "", "-"):
                     by_task.setdefault(event["task_id"], []).append(event)
+            project_tasks[name] = set(by_task)
             rows = []
             counts = dict.fromkeys(("active", "paused", "closed", "unknown", "conflict"), 0)
             for task_id, related in by_task.items():
@@ -180,6 +188,10 @@ class Workspace:
                     "state_heads": [{"event_id": e["event_id"], "created_at": at(e),
                                      "task_state": e["content"]["task_state"]}
                                     for e in lifecycle.get("heads", [])],
+                    "execution": task_context.execution_status(current_by_task.get(task_id, []), task_id,
+                                                               sources=snap["sources"]) if project else None,
+                    "session_count": len(task_context.session_references(current_by_task.get(task_id, []), task_id,
+                                                                        sources=snap["sources"])) if project else None,
                 })
             if task and task not in by_task:
                 raise FileNotFoundError("任务不属于此项目")
@@ -188,6 +200,7 @@ class Workspace:
                 "name": name, "title": metadata.get("title", name),
                 "description": metadata.get("description", metadata.get("path", "")),
                 "kind": metadata["kind"], "home": metadata.get("home"),
+                "freshness": snap["freshness"].get(metadata.get("home"), {}),
                 "documents": metadata.get("documents", []),
                 "repositories": metadata.get("repositories", [name]),
                 "first_recorded_at": first, "last_recorded_at": last,
@@ -220,10 +233,70 @@ class Workspace:
         projects.sort(key=lambda item: (item["last_recorded_at"] or "", item["name"]), reverse=True)
         starts = [p["first_recorded_at"] for p in projects if p["first_recorded_at"]]
         ends = [p["last_recorded_at"] for p in projects if p["last_recorded_at"]]
+        # Compute deduplicated counts and the range from this same generation.
+        # Shared tasks may appear in several project rows, but count only once.
+        selected_ids = {e["event_id"] for related in grouped.values() for e in related}
+        task_ids = {e["task_id"] for related in grouped.values() for e in related
+                    if e.get("task_id") not in (None, "", "-")}
+        counts = Counter(snap["tasks"].get(key, {}).get("state", "unknown") for key in task_ids)
+        all_ids = {e["event_id"] for e in snap["events"]}
+        all_tasks = {e["task_id"] for e in snap["events"] if e.get("task_id") not in (None, "", "-")}
+        assigned_tasks = {e["task_id"] for e in snap["events"]
+                          if e.get("task_id") not in (None, "", "-") and snap["membership"].get(e["event_id"])}
+        attention = []
+        for task_id in sorted(task_ids):
+            lifecycle = snap["tasks"].get(task_id, {})
+            related = current_by_task.get(task_id, [])
+            risks = [e for e in related if e["event_id"] in selected_ids
+                     and e["event_id"] not in snap["replaced"] and e["status"] in {"active", "needs_verification"}
+                     and e["event_type"] in {"risk", "hypothesis"}]
+            execution = task_context.execution_status(related, task_id, sources=snap["sources"])
+            reasons = []
+            if lifecycle.get("state") == "conflict":
+                reasons.append("业务状态有冲突")
+            session_states = {item["state"] for item in execution["sessions"]}
+            if "waiting" in session_states:
+                reasons.append("Agent 等待输入")
+            if "error" in session_states:
+                reasons.append("Agent 报告错误")
+            if risks and lifecycle.get("state") not in {"paused", "closed"}:
+                reasons.append(f"{len(risks)} 项未决风险 / 待验证结论")
+            if reasons:
+                attention.append({"task_id": task_id, "state": lifecycle.get("state", "unknown"),
+                                  "reasons": reasons, "execution": execution,
+                                  "event_ids": [e["event_id"] for e in risks[-5:]],
+                                  "projects": [name for name in selected if task_id in project_tasks[name]]})
         return {"projects": projects, "range": {"start": min(starts, default=None),
                                                  "end": max(ends, default=None)},
+                "task_counts": dict.fromkeys(("active", "paused", "closed", "unknown", "conflict"), 0) | dict(counts),
+                "task_count": len(task_ids),
+                "coverage": {"total_events": len(all_ids), "associated_events": len(selected_ids),
+                             "unassigned_events": len(all_ids - {key for key, names in snap["membership"].items() if names})
+                             if knowledge else 0,
+                             "unassigned_tasks": len(all_tasks - assigned_tasks) if knowledge else 0,
+                             "unassigned_task_items": [{"task_id": key,
+                                 "state": snap["tasks"].get(key, {}).get("state", "unknown")}
+                                 for key in sorted(all_tasks - assigned_tasks)[:20]] if knowledge else []},
+                "attention": attention[:8], "attention_count": len(attention),
+                "task_detail": self._task_detail(snap, task, selected_ids) if task else None,
                 "sampled_at": snap["overview"]["sampled_at"],
                 "project_mode": snap["overview"]["project_mode"], "errors": snap["errors"]}
+
+    @staticmethod
+    def _task_detail(snap, task, selected_ids):
+        related = [e for e in snap["events"] if e.get("task_id") == task
+                   and e["event_id"] in selected_ids and e["event_id"] not in snap["replaced"]
+                   and e["status"] != "superseded" and "task_state" not in e["content"]]
+        def entries(kinds, attention=False):
+            selected = [e for e in related if e["event_type"] in kinds
+                        and (not attention or e["status"] in {"active", "needs_verification"})]
+            return [summary(e, snap["sources"], snap["replaced"]) for e in reversed(selected[-5:])]
+        return {"task_id": task, "sessions": task_context.session_references(
+                    snap["events"], task, sources=snap["sources"]),
+                "execution": task_context.execution_status(snap["events"], task, sources=snap["sources"]),
+                "decisions": entries({"decision", "preference", "config"}),
+                "results": entries({"test_result", "bugfix"}),
+                "attention": entries({"risk", "hypothesis"}, attention=True)}
 
     def _knowledge_projects(self, events, documents, errors):
         """Use curated evidence, not a union of overlapping repository tags."""
@@ -260,7 +333,7 @@ class Workspace:
                               "home": relative, "documents": sorted(docs), "repositories": [],
                               "events": 0, "active_tasks": 0, "last_event_at": None, "latest_title": ""}
             source = home.with_suffix(".json")
-            if source.is_file():
+            if source.is_file() and source.resolve().is_relative_to(self.root):
                 try:
                     curated = json.loads(source.read_text())
                     for raw in curated.get("events", []):
@@ -271,8 +344,20 @@ class Workspace:
                             task_projects.setdefault(event["task_id"], set()).add(name)
                 except (ValueError, TypeError, AttributeError) as error:
                     errors.append(f"项目来源格式无效：{source.relative_to(self.root)}：{type(error).__name__}")
+        replaced = {key for event in events for key in event.get("supersedes", [])}
+        for event in events:
+            explicit = event["content"].get("business_projects")
+            if (explicit is not None and event.get("task_id") not in (None, "", "-")
+                    and event["event_id"] not in replaced and event["status"] != "superseded"):
+                task_projects.setdefault(event["task_id"], set()).update(set(explicit) & projects.keys())
         for event in events:
             key = event["event_id"]
+            explicit = event["content"].get("business_projects")
+            if explicit is not None:
+                membership[key] = set(explicit) & projects.keys()
+                missing = set(explicit) - projects.keys()
+                if missing:
+                    errors.append(f"{key} 引用未整理的业务项目：{', '.join(sorted(missing))}")
             if key not in membership:
                 # Continue unambiguous curated tasks; shared workday tasks do not
                 # make all future records belong to every historical project.
@@ -326,11 +411,21 @@ class Workspace:
                         "errors": errors}
         raise FileNotFoundError("记忆不存在")
 
-    def handoff(self, task, limit=5):
+    def handoff(self, task, limit=5, to_agent=None):
         snap = self.snapshot()
         result = memory.handoff(self.root, snap["events"], task, limit=min(20, max(1, int(limit))),
-                                sources=snap["sources"])
+                                sources=snap["sources"], to_agent=to_agent)
         return result | {"errors": snap["errors"]}
+
+    def review(self, task, limit=20, max_chars=12000):
+        snap = self.snapshot()
+        if task not in snap["tasks"]:
+            raise FileNotFoundError("任务不存在")
+        limit, max_chars = int(limit), int(max_chars)
+        if not 1 <= limit <= 50 or not 1000 <= max_chars <= 30000:
+            raise ValueError("审查条数须为 1–50，字符预算须为 1000–30000")
+        return memory_review.prepare_review(snap["events"], snap["sources"], task=task,
+                                            limit=limit, max_chars=max_chars)
 
     def context(self, event_id, before=3, after=3):
         snap = self.snapshot()
@@ -360,8 +455,18 @@ class Workspace:
     def document(self, value: str):
         path = self.document_path(value)
         relative = path.relative_to(self.root).as_posix()
+        # Previewing one document must not freeze the entire directory listing.
+        # Normal navigation already has a snapshot; standalone previews can
+        # check this document without creating a second directory cache.
+        snap = self._cached if self.clock() < self._expires_at else None
+        freshness = snap["freshness"].get(relative) if snap else None
+        if freshness is None:
+            config = snap["config"] if snap else memory.load_config(self.root)
+            events = snap["events"] if snap else memory.load_events(self.root)[0]
+            freshness = knowledge.document_freshness(self.root, relative, events, config)
         if path.suffix == ".svg":
-            return {"path": relative, "kind": "svg", "asset": "api/asset?path=" + quote(relative)}
+            return {"path": relative, "kind": "svg", "asset": "api/asset?path=" + quote(relative),
+                    "freshness": freshness}
         if path.suffix != ".md":
             raise ValueError("此入口仅预览 Markdown / SVG")
         parser = MarkdownIt("js-default").enable("table")
@@ -384,7 +489,7 @@ class Workspace:
                     token.attrSet(attr, "#/documents?path=" + quote(target, safe="") +
                                   ("&anchor=" + quote(url.fragment) if url.fragment else ""))
         return {"path": relative, "kind": "md", "html": parser.renderer.render(tokens, parser.options, {}),
-                "updated_at": timestamp(path.stat().st_mtime)}
+                "updated_at": timestamp(path.stat().st_mtime), "freshness": freshness}
 
     def services(self):
         items = []
