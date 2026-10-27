@@ -35,7 +35,7 @@ $('#theme-toggle').addEventListener('click', () => {
   localStorage.setItem('backstage.theme', theme);
   updateThemeButton();
 });
-let overview, renderEpoch = 0, eventEpoch = 0, runtimeCleanup = ()=>{};
+let overview, renderEpoch = 0, eventEpoch = 0, toolEpoch = 0, runtimeCleanup = ()=>{};
 const content = $('#content');
 function route() { const [name, query] = location.hash.replace(/^#\/?/, '').split('?'); const params=new URLSearchParams(query); if(name==='memory' && params.get('business')) params.set('name',params.get('business')); return {name:labels[name] ? name : 'projects', params}; }
 function href(name, params = {}) { return `#/${name}?${new URLSearchParams(Object.entries(params).filter(([,v])=>v !== '' && v != null))}`; }
@@ -49,6 +49,62 @@ function empty(message) { return `<div class="empty">${icon('search')}<strong>${
 function heading(kicker, title, description, action = '') { return `<div class="page-heading journey-heading"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p>${description}</p></div>${action}</div>`; }
 function tag(text, color = '') { return `<span class="tag ${color}">${escape(text)}</span>`; }
 function taskTag(state) { return tag(states[state] || state, state === 'active' ? 'green' : state === 'conflict' ? 'amber' : ''); }
+function executionTag(execution) {
+  const state=execution?.state || 'unknown';
+  return tag({running:'Agent 运行中',waiting:'Agent 等待输入',error:'Agent 报告错误',idle:'Agent 空闲',unknown:'执行状态未知'}[state] || '执行状态未知', ['waiting','error'].includes(state)?'amber':state==='running'?'green':'');
+}
+function freshnessTag(value) {
+  const state=value?.state || 'unknown';
+  return tag({current:'覆盖源码未变',stale:'覆盖源码已变',needs_review:'有新记录待核验',unknown:'核验信息不足'}[state] || '核验信息不足', state==='current'?'green':['stale','needs_review'].includes(state)?'amber':'');
+}
+function freshnessPanel(value) {
+  if(!value) return '';
+  return `<details class="knowledge-freshness"><summary>${freshnessTag(value)}<span>知识来源与核验</span></summary><p>最后核验：${value.verified_at?when(value.verified_at):'未记录'} · 本次检查：${when(value.checked_at)}</p><p>源码未变化只说明覆盖范围与基线一致，内容仍需结合实际验证。</p>${(value.sources || []).map(source=>`<div><strong>${escape(source.repository)}</strong><code>${escape(source.commit)} → ${escape(source.current_commit || '当前提交不可用')}</code><p>覆盖：${escape((source.covers || []).join('、'))}</p>${source.changed_paths?.length?`<p>变化：${escape(source.changed_paths.join('、'))}</p>`:''}${(source.diagnostics || []).map(d=>`<p>${escape(d)}</p>`).join('')}</div>`).join('')}${(value.diagnostics || []).map(d=>`<p>${escape(d)}</p>`).join('')}${(value.source_event_ids || []).slice(0,5).map(id=>`<button class="reference-link" data-event="${escape(id)}">查看核验来源 ${escape(id)} ↗</button>`).join('')}</details>`;
+}
+function attentionPanel(data, projectName) {
+  if(!data.attention_count) return '';
+  return `<section class="panel task-attention"><div class="panel-heading"><h2>需要关注</h2><span>${number(data.attention_count)} 项任务 · 按已记录依据</span></div>${data.attention.map(item=>`<a class="attention-item" href="${href('projects',{name:projectName || item.projects[0],task:item.task_id})}"><strong>${escape(item.task_id)}</strong><span>${escape(item.reasons.join(' · '))}</span>${taskTag(item.state)}</a>`).join('')}${data.attention_count>data.attention.length?'<p class="panel-hint">仅展示前 8 项，进入项目继续查看。</p>':''}</section>`;
+}
+function taskContext(detail) {
+  if(!detail) return '';
+  const execution=detail.execution;
+  const records=(title,items)=>`<section><h3>${title}</h3>${items.length?items.map(item=>`<button class="context-record" data-event="${escape(item.event_id)}"><strong>${escape(item.title)}</strong><span>${escape(item.excerpt)}</span><small>${when(item.created_at)} · 查看依据 ↗</small></button>`).join(''):'<p class="panel-hint">尚无相关结论。</p>'}</section>`;
+  return `<section class="panel task-context"><div class="panel-heading"><h2>任务脉络 · 跨项目</h2>${executionTag(execution)}</div><div class="execution-observation"><p>${escape(execution.notice || '')}</p><span>执行观测：${when(execution.observed_at)} · 有效期 ${execution.fresh_seconds / 60} 分钟</span>${execution.event_id?`<button class="text-button" data-event="${escape(execution.event_id)}">查看执行观测依据 ↗</button>`:''}${execution.sessions.length?`<details class="session-execution"><summary>各会话执行观测 · ${execution.sessions.length} 个</summary>${execution.sessions.map(item=>`<div>${executionTag(item)}<span>${escape(item.session.agent)} · ${escape(item.session.machine_id)} · ${escape(item.session.session_id)}</span><span>${when(item.observed_at)} · ${escape(item.reason || '观测有效')}</span><button class="reference-link" data-event="${escape(item.event_id)}">查看观测依据 ↗</button></div>`).join('')}</details>`:''}</div><div class="task-conclusions">${records('最近决策',detail.decisions)}${records('验证与成果',detail.results)}${records('待核对事项',detail.attention)}</div><details class="session-references"><summary>关联 Agent 会话 · ${detail.sessions.length} 个</summary><p>会话是任务的工作来源；一个业务任务可以关联多个会话。</p>${detail.sessions.map(session=>`<div class="session-reference"><strong>${escape(session.agent)} · ${escape(session.machine_id)}</strong><code>${escape(session.session_id)}</code><span>${escape(session.repository || '')} ${escape(session.worktree || '')}</span><small>最近关联 ${when(session.last_seen_at)}</small><button class="reference-link" data-event="${escape(session.event_id)}">查看关联依据 ↗</button></div>`).join('') || '<p>尚未记录会话来源。后续由 Agent 在记录任务进展时附带会话标识。</p>'}</details><div class="task-tools"><label>交接给<select id="handoff-target"><option value="">其他 Agent</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="kimi">Kimi</option><option value="dsh">DeepSeek</option></select></label><button class="button" data-task-tool="handoff">生成交接摘要</button><button class="button" data-task-tool="review">准备记忆审查</button></div><div id="task-tool-output" aria-live="polite"></div></section>`;
+}
+function handoffText(data) {
+  const lines=[`任务：${data.task_id} · ${states[data.state] || data.state}`,`交接目标：${data.handoff?.to_agent || '其他 Agent'}（已准备，尚未派发）`,data.notice,''];
+  lines.push('业务状态依据：');
+  for(const head of data.heads) lines.push(`${head.event_id} · ${head.content.task_state} · ${head.content.what} · ${JSON.stringify(head.content.where)}`);
+  if(!data.heads.length) lines.push('暂无明确生命周期依据。');
+  lines.push('执行观测：',`${data.execution.state} · ${data.execution.observed_at || '未观测'} · ${data.execution.reason || ''}`,data.execution.notice);
+  for(const observation of data.execution.sessions) lines.push(`${observation.session.agent} · ${observation.session.machine_id} · ${observation.session.session_id} · ${observation.state} · ${observation.observed_at} · ${observation.event_id} · ${observation.source || ''}`);
+  lines.push('','当前仓库：');
+  for(const repo of data.repositories) lines.push(`${repo.name} · ${repo.branch || '分支未知'} · ${repo.commit || '提交不可用'} · ${repo.dirty===null?'状态未知':repo.dirty?'有未提交改动':'干净'}`);
+  for(const [title,items] of Object.entries(data.sections)) {
+    if(!items.length) continue;
+    lines.push('',title);
+    for(const item of items) lines.push(`- ${item.title}\n  ${item.text}\n  依据：${item.event_id} · ${item.source || ''}`);
+    if(data.omitted[title]) lines.push(`另 ${data.omitted[title]} 条未展开。`);
+  }
+  lines.push('','关联会话：');
+  for(const session of data.sessions || []) lines.push(`${session.agent} · ${session.machine_id} · ${session.session_id}`);
+  return lines.join('\n');
+}
+async function showTaskTool(kind, task, epoch) {
+  const request=++toolEpoch;
+  $('#task-tool-output').innerHTML='<p class="panel-hint">正在准备…</p>';
+  try {
+    const target=$('#handoff-target').value;
+    const data=await api(kind,{task,...(kind==='handoff' && target?{to_agent:target}:{})});
+    if(epoch!==renderEpoch || request!==toolEpoch) return;
+    const text=kind==='handoff'?handoffText(data):JSON.stringify(data);
+    $('#task-tool-output').innerHTML=`<div class="prepared-context"><strong>${kind==='handoff'?'交接摘要已准备，尚未派发':'审查材料已准备，尚未进行语义判断'}</strong><p>${kind==='handoff'?'复制到目标 Agent 即可继续；是否执行仍按任务授权。':'将材料交给当前 Agent，核对矛盾、重复和过期候选；审查建议须引用材料内的来源 ID。'}</p><button class="button" id="copy-task-context">复制材料</button><pre tabindex="0">${escape(text)}</pre><span id="copy-context-status" role="status"></span></div>`;
+    $('#copy-task-context').addEventListener('click',async()=>{
+      try {await navigator.clipboard.writeText(text);if(epoch===renderEpoch && request===toolEpoch) $('#copy-context-status').textContent='已复制';}
+      catch {if(epoch===renderEpoch && request===toolEpoch) $('#copy-context-status').textContent='当前浏览器不支持复制，请选中上方文字复制。';}
+    });
+  } catch(error) {if(epoch===renderEpoch && request===toolEpoch) $('#task-tool-output').innerHTML=`<p class="inline-error">${escape(error.message)}</p>`;}
+}
 function serviceCards(items) {
   const names = {'claude-feishu':'Feishu Bridge','watchdog-train':'训练监控','watchdog-b1k':'B1K 评测监控','cluster-monitor':'集群资源采集'};
   return items.map(s => `<div class="service-card"><div class="service-top"><span class="service-icon">${icon(s.name === 'claude-feishu' ? 'memory' : 'runtime')}</span>${tag(s.running ? (s.ready ? '就绪' : '进程运行中') : '未运行', s.running && s.ready ? 'green' : '')}</div><h3>${escape(names[s.name] || s.name)}</h3><p>${s.running ? `PID ${s.pid} · ${s.name === 'claude-feishu' ? (s.ready ? 'WebSocket 已连接' : '连接未就绪') : s.name === 'cluster-monitor' ? '集群资源采集进程' : '本机监控进程'}` : s.configured ? '本机已有配置，当前进程未运行' : '本机未发现运行进程'}</p>${s.running ? `<p class="service-version">启动版本：${escape(s.code_at_start?.version || '未知（旧记录）')}<br><code>${escape(s.code_at_start?.commit?.slice(0,12) || '无启动提交记录')}</code><br>${s.code_changed === true ? '启动后源码已变化' : s.code_changed === false ? '与本机源码版本一致' : '版本差异待核对'}</p>` : ''}</div>`).join('');
@@ -91,7 +147,7 @@ function gantt(rows, range, mode, project) {
     const dated=!!(row.first_recorded_at && row.last_recorded_at);
     const left=dated?pos(row.first_recorded_at):0, width=dated?Math.max(0.7,pos(row.last_recorded_at)-left):0;
     const dateText=dated?`${dateLabel(row.first_recorded_at)} → ${dateLabel(row.last_recorded_at)}`:'暂无时间记录';
-    return `<div class="gantt-row ${row.selected?'selected':''}"><div class="gantt-label"><a href="${url}"><strong>${escape(row.title || row.name)}</strong><small>${project?escape(row.task_id):`${row.task_count} 项任务 · ${row.documents.length} 份文档`}</small></a>${project?taskTag(row.state):''}</div><div class="gantt-track">${lines}${dated?`<a class="gantt-bar ${project?'state-'+row.state:'tone-'+i%4} ${width<12?'short-bar':''}" data-left="${left}" data-width="${width}" href="${url}" aria-label="${escape(row.title)}，${escape(dateText)}" title="${escape(row.title)} · ${escape(dateText)}"><span class="gantt-date">${escape(dateText)}</span><span class="gantt-milestone" aria-hidden="true"></span></a>`:'<span class="gantt-empty">暂无时间记录</span>'}</div></div>`;
+    return `<div class="gantt-row ${row.selected?'selected':''}"><div class="gantt-label"><a href="${url}"><strong>${escape(row.title || row.name)}</strong><small>${project?escape(row.task_id):`${row.task_count} 项任务 · ${row.documents.length} 份文档`}</small></a>${project?`<div class="task-state-pair">${taskTag(row.state)}${executionTag(row.execution)}</div>`:''}</div><div class="gantt-track">${lines}${dated?`<a class="gantt-bar ${project?'state-'+row.state:'tone-'+i%4} ${width<12?'short-bar':''}" data-left="${left}" data-width="${width}" href="${url}" aria-label="${escape(row.title)}，${escape(dateText)}" title="${escape(row.title)} · ${escape(dateText)}"><span class="gantt-date">${escape(dateText)}</span><span class="gantt-milestone" aria-hidden="true"></span></a>`:'<span class="gantt-empty">暂无时间记录</span>'}</div></div>`;
   }).join('')}</div></div></section>`;
 }
 function positionGantt() {
@@ -122,10 +178,12 @@ async function showProjects(params, epoch) {
   if(!name) {
     const query=params.get('q') || '', state=params.get('state') || '';
     const projects=data.projects.filter(p=>fold([p.title,p.name,p.description,...p.repositories].join(' ')).includes(fold(query)) && (!state || p.task_counts[state]>0));
-    const projectNames=new Set(data.projects.map(p=>p.name));
-    const totals=overview.tasks.filter(t=>(data.project_mode==='knowledge'?t.business_projects:t.projects).some(p=>projectNames.has(p))).reduce((counts,t)=>{counts[t.state]=(counts[t.state] || 0)+1;return counts;},{});
+    const totals=data.task_counts;
     content.innerHTML=heading('PROJECT JOURNEYS','把项目，放回时间里。','从最早记录到最近进展，沿着时间看每个项目如何走到今天。')+
-      `<div class="journey-metrics"><div class="journey-metric"><small>业务项目</small><strong>${data.projects.length}</strong></div><div class="journey-metric"><small>进行中任务</small><strong>${totals.active || 0}</strong></div><div class="journey-metric"><small>已关闭任务</small><strong>${totals.closed || 0}</strong></div><div class="journey-metric"><small>记录覆盖</small><strong class="journey-date-range">${dateLabel(data.range?.start)}<span>— ${dateLabel(data.range?.end)}</span></strong></div></div>`+
+      `<div class="journey-metrics"><div class="journey-metric"><small>${data.project_mode==='knowledge'?'业务项目':'来源仓库'}</small><strong>${data.projects.length}</strong></div><div class="journey-metric"><small>进行中任务</small><strong>${totals.active || 0}</strong></div><div class="journey-metric"><small>已关闭任务</small><strong>${totals.closed || 0}</strong></div><div class="journey-metric"><small>记录覆盖</small><strong class="journey-date-range">${dateLabel(data.range?.start)}<span>— ${dateLabel(data.range?.end)}</span></strong></div></div>`+
+      `<div class="journey-stat-scope">当前全部项目口径 · 按任务 ID 去重 · 未声明 ${totals.unknown || 0} · 暂停 ${totals.paused || 0} · 冲突 ${totals.conflict || 0}<br>已关联 ${number(data.coverage.associated_events)} / ${number(data.coverage.total_events)} 条记录；未归属 ${number(data.coverage.unassigned_events)} 条记录、${number(data.coverage.unassigned_tasks)} 项任务。记录日期表示证据覆盖范围。</div>`+
+      attentionPanel(data)+
+      (data.coverage.unassigned_task_items.length?`<details class="unassigned-tasks"><summary>查看未归属任务（前 ${data.coverage.unassigned_task_items.length} 项）</summary>${data.coverage.unassigned_task_items.map(t=>`<div><code>${escape(t.task_id)}</code>${taskTag(t.state)}</div>`).join('')}<p>由 Agent 记录明确业务项目归属后，相关任务会进入项目时间线。</p></details>`:'')+
       `<div class="journey-toolbar"><form class="journey-search" id="project-search">${icon('search')}<input aria-label="筛选项目" name="q" placeholder="找到一个项目…" value="${escape(query)}"><select name="state" aria-label="按关联任务状态筛选"><option value="">全部项目</option>${Object.entries(states).map(([key,label])=>`<option value="${key}" ${state===key?'selected':''}>含${escape(label)}任务</option>`).join('')}</select><button class="button" type="submit">筛选</button></form>${scaleControls(mode,params)}</div>`+
       (projects.length?gantt(projects,data.range,mode):empty('没有匹配的项目'))+
       `<p class="journey-note">时间条表示首条至最近一条已记录活动，不等于实际工期；点击项目查看任务历程与文档。</p>${data.project_mode!=='knowledge'?'<p class="journey-note">当前尚无项目知识，暂按来源仓库展示；整理项目知识后可聚合跨仓工作。</p>':''}`;
@@ -136,14 +194,16 @@ async function showProjects(params, epoch) {
     const selected=tasks.find(t=>t.task_id===task);
     const counts=project.task_counts;
     content.innerHTML=heading('PROJECT JOURNEY',escape(project.title),escape(project.description || '沿时间回顾这项工作的关键节点。'),`<a class="button" href="#/projects">← 全部项目</a>`)+
-      `<div class="journey-project-links">${project.home?`<a class="button" href="${href('documents',{business:name,path:project.home})}">${icon('documents')}项目知识</a>`:''}<a class="button" href="${href('documents',project.kind==='knowledge'?{business:name}:{all:'true'})}">项目文档 · ${project.documents.length}</a><span>${dateLabel(project.first_recorded_at)} → ${dateLabel(project.last_recorded_at)}</span></div>`+
+      `<div class="journey-project-links">${project.home?`<a class="button" href="${href('documents',{business:name,path:project.home})}">${icon('documents')}项目知识</a>`:''}<a class="button" href="${href('documents',project.kind==='knowledge'?{business:name}:{all:'true'})}">项目文档 · ${project.documents.length}</a>${freshnessTag(project.freshness)}<span>${dateLabel(project.first_recorded_at)} → ${dateLabel(project.last_recorded_at)}</span></div>`+
       `<div class="journey-toolbar"><div class="journey-legend">${Object.entries(states).filter(([key])=>counts[key]).map(([key,label])=>`<span><i class="legend-dot ${key}"></i>${label} ${counts[key]}</span>`).join('') || '<span>尚无已关联任务</span>'}</div>${scaleControls(mode,params)}</div>`+
       (tasks.length?`<details class="journey-task-board" ${task || tasks.length<=6?'open':''}><summary>任务时间线 · ${tasks.length} 项<span>按需查看各项工作的记录跨度</span></summary><form class="journey-task-picker" id="task-picker"><label>聚焦任务<select name="task" aria-label="聚焦任务"><option value="">整个项目</option>${tasks.map(t=>`<option value="${escape(t.task_id)}" ${t.task_id===task?'selected':''}>${escape(t.title)} · ${escape(states[t.state])}</option>`).join('')}</select></label></form>${gantt(tasks.map(t=>({...t,selected:t.task_id===task})),{start:project.first_recorded_at,end:project.last_recorded_at},mode,name)}</details>`:'<div class="panel panel-hint">尚无任务划分，可先阅读项目知识和下方关键节点。</div>')+
-      `<p class="journey-note">条形表示任务记录跨度；任务状态依据明确声明，未声明状态单独标识。</p>`+
-      `<div class="journey-detail-grid"><section class="panel"><div class="panel-heading journey-section-heading"><h2>${selected?'任务历程':'项目历程'}</h2>${task?`<a href="${href('projects',{name,scale:mode})}">查看整个项目 →</a>`:`<span>关键节点节选</span>`}</div>${selected?`<div class="journey-task-filter"><strong>${escape(selected.title)}</strong>${taskTag(selected.state)}<small>${escape(task)}</small></div>`:''}${items.length>10?milestoneRows(items.slice(0,3))+`<details class="journey-more"><summary>展开中间 ${items.length-6} 个关键节点</summary>${milestoneRows(items.slice(3,-3))}</details>`+milestoneRows(items.slice(-3)):milestoneRows(items) || '<p class="panel-hint">暂无关键节点。</p>'}${project.milestone_omitted?`<p class="journey-note">展示覆盖首尾的 ${items.length} 个关键节点，另 ${project.milestone_omitted} 个未展开；点击任务时间条可聚焦单项工作。</p>`:''}</section><aside class="journey-task-summary panel"><div class="panel-heading"><h2>项目脉络</h2></div><div class="panel-hint"><strong>最早记录</strong><p>${dateLabel(project.first_recorded_at)}</p><strong>最近记录</strong><p>${dateLabel(project.last_recorded_at)}</p><strong>关联任务</strong><p>${tasks.length} 项 · ${counts.active || 0} 项进行中</p><strong>来源仓库</strong><p>${escape(project.repositories.join('、') || '暂无来源仓库')}</p><strong>阅读入口</strong><p>项目知识保留完整叙述，时间线聚焦决策、验证、修复与状态变化。</p></div></aside></div>`;
+      `<p class="journey-note">条形表示任务记录跨度；业务状态与 Agent 执行观测分别记录，进行中不代表进程正在运行。</p>`+
+      (task?taskContext(data.task_detail):attentionPanel(data,name))+
+      `<div class="journey-detail-grid"><section class="panel"><div class="panel-heading journey-section-heading"><h2>${selected?'项目内任务历程':'项目历程'}</h2>${task?`<a href="${href('projects',{name,scale:mode})}">查看整个项目 →</a>`:`<span>关键节点节选</span>`}</div>${selected?`<div class="journey-task-filter"><strong>${escape(selected.title)}</strong>${taskTag(selected.state)}<small>${escape(task)}</small></div>`:''}${items.length>10?milestoneRows(items.slice(0,3))+`<details class="journey-more"><summary>展开中间 ${items.length-6} 个关键节点</summary>${milestoneRows(items.slice(3,-3))}</details>`+milestoneRows(items.slice(-3)):milestoneRows(items) || '<p class="panel-hint">暂无关键节点。</p>'}${project.milestone_omitted?`<p class="journey-note">展示覆盖首尾的 ${items.length} 个关键节点，另 ${project.milestone_omitted} 个未展开；点击任务时间条可聚焦单项工作。</p>`:''}</section><aside class="journey-task-summary panel"><div class="panel-heading"><h2>项目脉络</h2></div><div class="panel-hint"><strong>最早记录</strong><p>${dateLabel(project.first_recorded_at)}</p><strong>最近记录</strong><p>${dateLabel(project.last_recorded_at)}</p><strong>关联任务</strong><p>${tasks.length} 项 · ${counts.active || 0} 项进行中</p><strong>来源仓库</strong><p>${escape(project.repositories.join('、') || '暂无来源仓库')}</p><strong>阅读入口</strong><p>项目知识保留完整叙述，时间线聚焦决策、验证、修复与状态变化。</p></div></aside></div>`;
   }
   $('.journey-task-board')?.addEventListener('toggle',positionGantt);
   $('#task-picker select')?.addEventListener('change',e=>{location.hash=href('projects',{name,scale:mode,task:e.target.value});});
+  document.querySelectorAll('[data-task-tool]').forEach(button=>button.addEventListener('click',()=>showTaskTool(button.dataset.taskTool,task,epoch)));
   positionGantt();
   if(data.errors.length) content.insertAdjacentHTML('afterbegin','<p class="data-warning">部分来源数据无效，项目历程可能不完整；请在监控的本机服务中查看工作区自检。</p>');
 }
@@ -159,12 +219,12 @@ async function showDocuments(params, epoch) {
   const path = params.get('path') || project?.home, query=params.get('q') || '';
   const docs = data.items;
   const context=business ? {business} : {all:'true'};
-  content.innerHTML = heading('KNOWLEDGE LIBRARY',escape(project?.title || '全部文档'),project ? '围绕项目阅读；文档保留原有路径和来源。' : '通用说明和未归属文档也可在这里查找。',`<a class="button" href="#/documents">← 按项目阅读</a>`) + `<div class="document-layout"><aside class="document-list"><form id="document-filter" class="document-search">${icon('search')}<input aria-label="筛选文档" name="q" placeholder="搜索标题、路径或正文…" value="${escape(query)}"></form><div id="document-links">${docs.map(d=>`<a href="${href('documents',{...context,path:d.path,q:query})}" class="document-link ${path === d.path ? 'selected' : ''}">${icon('documents')}<span><strong>${escape(d.title)}</strong><small>${escape(d.path)}</small>${d.excerpt ? `<small class="document-excerpt">${escape(d.excerpt)}</small>` : ''}</span><span class="file-kind">${d.kind.toUpperCase()}</span></a>`).join('') || empty('没有匹配的文档')}</div></aside><section class="document-preview panel" id="document-preview"><div class="document-placeholder">${icon('documents')}<h2>让知识触手可及。</h2><p>选择一份文档，开始阅读。</p><span>${number(data.items.length)} 份 Markdown / SVG 文档</span></div></section></div>`;
+  content.innerHTML = heading('KNOWLEDGE LIBRARY',escape(project?.title || '全部文档'),project ? '围绕项目阅读；文档保留原有路径和来源。' : '通用说明和未归属文档也可在这里查找。',`<a class="button" href="#/documents">← 按项目阅读</a>`) + `<div class="document-layout"><aside class="document-list"><form id="document-filter" class="document-search">${icon('search')}<input aria-label="筛选文档" name="q" placeholder="搜索标题、路径或正文…" value="${escape(query)}"></form><div id="document-links">${docs.map(d=>`<a href="${href('documents',{...context,path:d.path,q:query})}" class="document-link ${path === d.path ? 'selected' : ''}">${icon('documents')}<span><strong>${escape(d.title)}</strong><small>${escape(d.path)}</small>${freshnessTag(d.freshness)}${d.excerpt ? `<small class="document-excerpt">${escape(d.excerpt)}</small>` : ''}</span><span class="file-kind">${d.kind.toUpperCase()}</span></a>`).join('') || empty('没有匹配的文档')}</div></aside><section class="document-preview panel" id="document-preview"><div class="document-placeholder">${icon('documents')}<h2>让知识触手可及。</h2><p>选择一份文档，开始阅读。</p><span>${number(data.items.length)} 份 Markdown / SVG 文档</span></div></section></div>`;
   $('#document-filter').addEventListener('submit',e=>{e.preventDefault();location.hash=href('documents',{...context,q:new FormData(e.currentTarget).get('q'),path});});
   if (!path) return;
   const doc = await api('document',{path});
   if (epoch !== renderEpoch) return;
-  $('#document-preview').innerHTML = `<div class="document-toolbar"><span>${escape(path)}</span>${doc.updated_at ? `<time>文件更新 ${when(doc.updated_at)}</time>` : ''}</div>${doc.kind === 'svg' ? `<iframe class="svg-preview" title="SVG 文档预览" sandbox src="${escape(doc.asset)}"></iframe>` : `<article class="prose">${doc.html}</article>`}`;
+  $('#document-preview').innerHTML = `<div class="document-toolbar"><span>${escape(path)}</span>${doc.updated_at ? `<time>文件更新 ${when(doc.updated_at)}</time>` : ''}</div>${freshnessPanel(doc.freshness)}${doc.kind === 'svg' ? `<iframe class="svg-preview" title="SVG 文档预览" sandbox src="${escape(doc.asset)}"></iframe>` : `<article class="prose">${doc.html}</article>`}`;
   if (doc.kind === 'md') {
     document.querySelectorAll('.prose table').forEach(table=>{const scroll=document.createElement('div');scroll.className='table-scroll';scroll.tabIndex=0;scroll.setAttribute('role','region');scroll.setAttribute('aria-label','文档表格，可横向滚动');table.before(scroll);scroll.append(table);});
     document.querySelectorAll('.prose h1,.prose h2,.prose h3,.prose h4').forEach(h=>h.id='doc-'+h.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu,'').replace(/\s+/g,'-'));
@@ -243,7 +303,7 @@ async function render() {
   document.querySelectorAll('[data-nav]').forEach(a=>{a.classList.toggle('active',a.dataset.nav===name);if(a.dataset.nav===name)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
   content.innerHTML='<div class="loading">正在读取工作区…</div>';
   try {
-    overview ||= await api('overview');
+    overview = await api('overview');
     if(epoch !== renderEpoch) return;
     if(!params.get('name') && params.get('task')) { const projects=overview.tasks.find(t=>t.task_id===params.get('task'))?.business_projects || []; if(projects.length===1) params.set('name',projects[0]); }
     $('#workspace-name').textContent=overview.workspace;

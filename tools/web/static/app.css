@@ -437,3 +437,39 @@ button,input,select { font-weight: 600; }
 h1,h2,h3,.journey-heading h1,.journey-project-head h1,
 .section-heading h2,.panel-heading h2,.journey-section-heading h2,
 .gantt-label strong,.milestone-body h3,.journey-task-summary h2,.journey-task-summary h3 { font-weight: 700; }
+/* Task context stays inside project journeys and uses the existing theme tokens. */
+.journey-stat-scope { color: var(--muted); font-size: 13px; line-height: 1.9; margin: -12px 0 24px; }
+.task-attention,.task-context { margin: 24px 0; }
+.attention-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 15px 20px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.attention-item > span:not(.tag) { flex: 1 1 240px; color: var(--muted); }
+.attention-item:hover,.context-record:hover { background: var(--journey-wash); }
+.unassigned-tasks { margin-bottom: 24px; font-size: 13px; color: var(--muted); line-height: 1.9; }
+.unassigned-tasks summary,.session-references summary,.knowledge-freshness summary { cursor: pointer; }
+.unassigned-tasks > div { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 0; overflow-wrap: anywhere; }
+.task-state-pair { display: flex; gap: 6px; flex-wrap: wrap; }
+.execution-observation { padding: 16px 20px; color: var(--muted); font-size: 13px; line-height: 1.9; }
+.execution-observation button { display: block; margin-top: 8px; }
+.session-execution { overflow-wrap: anywhere; }
+.session-execution > div { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 0; border-top: 1px solid var(--line); }
+.task-conclusions { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); border-top: 1px solid var(--line); }
+.task-conclusions > section { min-width: 0; padding: 18px; border-right: 1px solid var(--line); }
+.task-conclusions > section:last-child { border-right: 0; }
+.task-conclusions h3 { font-size: 14px; margin-bottom: 12px; }
+.context-record { display: block; width: 100%; text-align: left; background: none; color: inherit; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 12px 0; overflow-wrap: anywhere; }
+.context-record strong,.context-record span,.context-record small { display: block; line-height: 1.8; }
+.context-record strong { font-size: 14px; }
+.context-record span { font-size: 13px; color: var(--muted); margin: 6px 0; }
+.context-record small { font-size: 12px; color: var(--muted); }
+.session-references,.knowledge-freshness { padding: 18px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; line-height: 1.9; overflow-wrap: anywhere; }
+.session-references > p,.knowledge-freshness p { margin: 10px 0; }
+.session-reference,.knowledge-freshness > div { padding: 12px 0; border-top: 1px solid var(--line); }
+.session-reference > *,.knowledge-freshness code { display: block; }
+.session-reference code,.knowledge-freshness code { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.knowledge-freshness summary > span { margin-right: 10px; }
+.task-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; padding: 18px 20px; border-top: 1px solid var(--line); }
+.task-tools label { color: var(--muted); font-size: 13px; display: flex; gap: 10px; align-items: center; }
+.task-tools select { max-width: 150px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 13px; }
+.prepared-context { padding: 18px 20px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.9; }
+.prepared-context p { color: var(--muted); margin: 10px 0; }
+.prepared-context pre { max-height: 440px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; line-height: 1.9; margin-top: 14px; }
+@media(max-width:900px) { .task-conclusions { grid-template-columns: minmax(0,1fr); } .task-conclusions > section { border-right: 0; border-bottom: 1px solid var(--line); } }

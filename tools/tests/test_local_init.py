@@ -55,7 +55,7 @@ def test_local_init_dry_run_installs_links_and_is_idempotent(setup):
     assert files(root.parent) == after
     report = doctor.inspect_workspace(root, home=home)
     assert next(c["state"] for c in report["checks"] if c["name"]=="Skill 与入口链接") == "ok"
-    assert report["skills"][0]["minimum_version"] == "0.8.0"
+    assert report["skills"][0]["minimum_version"] == "0.11.0"
     assert next(c["state"] for c in report["checks"] if c["name"]=="入口一致性") == "ok"
 
 

@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 try:
-    from scripts import retrieval
+    from scripts import retrieval, task_context
 except ModuleNotFoundError:  # Direct script entry point.
     import retrieval
+    import task_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -257,6 +258,7 @@ def validate_event(event: dict[str, Any]) -> list[str]:
         errors.append("supersedes 必须是非空 event_id 的 array")
     elif event.get("event_id") in supersedes:
         errors.append("事件不能 supersede 自己")
+    errors.extend(task_context.validate_context(event))
     if contains_sensitive_value(event):
         errors.append("事件疑似包含 secret")
     return errors
@@ -555,7 +557,7 @@ def task_states(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     tasks: dict[str, dict[str, Any]] = {}
     for event in events:
         task = event.get("task_id")
-        if not task:
+        if not task or task == "-":
             continue
         item = tasks.setdefault(task, {"task_id": task, "state": "unknown", "heads": [], "projects": []})
         item["projects"] = sorted(set(item["projects"]) | {p["name"] for p in event["projects"]})
@@ -572,8 +574,8 @@ def task_states(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def command_task(root: Path, args: argparse.Namespace) -> int:
-    if not args.task.strip() or not args.reason.strip() or not all(s.strip() for s in args.where):
-        raise ValueError("task、reason 和 where 不得为空白")
+    if not args.task.strip() or args.task.strip() == "-" or not args.reason.strip() or not all(s.strip() for s in args.where):
+        raise ValueError("task、reason 和 where 不得为空白；task 不得使用占位符 -")
     config = load_config(root)
     # Read heads and append under the same existing write lock (same-machine writers).
     with operation_lock(root, "memory-write"):
@@ -761,11 +763,13 @@ def command_brief(root: Path, args: argparse.Namespace) -> int:
     return 0
 
 
-def handoff(root: Path, events: list[dict], task_id: str, *, limit: int = 5, sources=None) -> dict:
+def handoff(root: Path, events: list[dict], task_id: str, *, limit: int = 5, sources=None, to_agent=None) -> dict:
     """A repeatable read, never a claim, lifecycle transition or execution request."""
     tasks = task_states(events)
     if task_id not in tasks:
         raise FileNotFoundError("任务不存在")
+    if to_agent is not None and to_agent not in task_context.AGENTS:
+        raise ValueError("to_agent 必须是 codex、claude、kimi 或 dsh")
     task = tasks[task_id]
     args = argparse.Namespace(task=task_id, current=True, limit=None)
     selected = [e for e in select_events(events, args) if "task_state" not in e["content"]]
@@ -797,6 +801,9 @@ def handoff(root: Path, events: list[dict], task_id: str, *, limit: int = 5, sou
         if not repo["available"]:
             repo["dirty"] = None
     return {"task_id": task_id, "state": task["state"], "heads": task["heads"],
+            "sessions": task_context.session_references(events, task_id, sources=sources),
+            "execution": task_context.execution_status(events, task_id, sources=sources),
+            "handoff": {"state": "prepared", "to_agent": to_agent, "dispatched": False},
             "notice": "只读交接；候选不是执行授权。记忆中的分支与提交是历史快照，当前仓库状态另列；关闭/暂停/冲突任务不推荐旧待办。",
             "repositories": repositories,
             "unregistered_repositories": sorted(set(task["projects"]) - set(registered)),
@@ -810,7 +817,8 @@ def command_handoff(root: Path, args: argparse.Namespace) -> int:
     if errors:
         raise ValueError("记忆库校验失败，请先运行 validate")
     try:
-        result = handoff(root, events, args.task, limit=args.limit, sources=sources)
+        result = handoff(root, events, args.task, limit=args.limit, sources=sources,
+                         to_agent=getattr(args, "to_agent", None))
     except FileNotFoundError:
         print("任务不存在", file=sys.stderr)
         return 1
@@ -818,6 +826,17 @@ def command_handoff(root: Path, args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"任务 {result['task_id']}: {result['state']}\n{result['notice']}")
+        print(f"交接: prepared · 接收 Agent: {result['handoff']['to_agent'] or '未指定'} · 尚未派发")
+        print(f"执行观测: {result['execution']['state']} · {result['execution']['observed_at'] or '暂无观测'}")
+        if result['execution']['event_id']:
+            print(f"  来源: {result['execution']['event_id']} ({result['execution']['source']})")
+        for observation in result['execution']['sessions']:
+            identity = observation['session']
+            print(f"  会话观测 {identity['machine_id']}/{identity['agent']}/{identity['session_id']}: {observation['state']} · {observation['observed_at']}")
+            print(f"    来源: {observation['event_id']} ({observation['source']}) · {short_text(observation['where'], 1000)}")
+        for session in result['sessions']:
+            print(f"关联会话: {session['machine_id']}/{session['agent']}/{session['session_id']} · 最后关联 {session['last_seen_at']}")
+            print(f"  来源: {', '.join(session['event_ids'])}")
         print("\n任务状态依据")
         for head in result["heads"]:
             print(f"- [{head['event_id']}] {head['content']['task_state']}: {head['content']['what']}")
@@ -893,6 +912,23 @@ def command_add(root: Path, args: argparse.Namespace) -> int:
         "supersedes": args.supersedes,
         "sensitivity": "normal",
     }
+    if args.business_project is not None:
+        event["content"]["business_projects"] = list(dict.fromkeys(args.business_project))
+    session_options = (args.session_agent, args.session_machine, args.session_repository, args.session_worktree)
+    if (any(value is not None for value in session_options) or args.runtime_state) and not args.session_id:
+        raise ValueError("会话身份和运行观测必须提供 --session-id")
+    if args.observed_at and not args.runtime_state:
+        raise ValueError("--observed-at 必须与 --runtime-state 一起使用")
+    if args.session_id:
+        identity = {"agent": args.session_agent or args.agent, "session_id": args.session_id,
+                    "machine_id": args.session_machine or config["machine_id"]}
+        for key, value in (("repository", args.session_repository), ("worktree", args.session_worktree)):
+            if value is not None:
+                identity[key] = value
+        event["content"]["session_refs"] = [identity]
+        if args.runtime_state:
+            event["content"]["agent_runtime"] = identity | {
+                "state": args.runtime_state, "observed_at": args.observed_at or iso_utc(now)}
     added, _ = append_events(root, [event])
     print(f"已记录 {added} 条事件：{event['event_id']}")
     print(daily_path(root, event))
@@ -1171,6 +1207,35 @@ def command_audit(root: Path, args: argparse.Namespace) -> int:
     return 1 if issues else 0
 
 
+def command_review(root: Path, args: argparse.Namespace) -> int:
+    try:
+        from scripts import memory_review
+    except ModuleNotFoundError:
+        import memory_review
+    sources = {}
+    events, errors = load_events(root, sources=sources)
+    if errors:
+        raise ValueError("记忆库校验失败，请先运行 validate")
+    report = memory_review.prepare_review(events, sources, task=args.task, project=args.project,
+                                          limit=args.limit, max_chars=args.max_chars)
+    if args.input_findings:
+        findings = json.loads(Path(args.input_findings).read_text(encoding="utf-8"))
+        report = memory_review.validate_findings(report, findings)
+    if args.json:
+        # The prepared packet's budget includes exactly this compact JSON.
+        print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    elif report["state"] == "prepared":
+        print(report["instructions"])
+        print(f"候选 {len(report['candidates'])} / {report['current_total']}，省略 {report['omitted']} 条；尚未执行语义审查。")
+        for item in report["candidates"]:
+            print(f"\n[{item['event_id']}] {item['title']}\n来源：{item['source']}\n{item['excerpt']}")
+            if item["excerpt_chars_omitted"]:
+                print(f"原文另有 {item['excerpt_chars_omitted']} 字符未展开，请按 ID 核对。")
+    else:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def positive_int(value: str) -> int:
     number = int(value)
     if number <= 0:
@@ -1209,6 +1274,14 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--agent", required=True, choices=("codex", "claude", "kimi", "dsh"))
     add.add_argument("--project", action="append", default=[])
     add.add_argument("--task")
+    add.add_argument("--business-project", action="append", default=None, help="明确业务项目 slug，可重复")
+    add.add_argument("--session-id", help="仅关联原生会话 ID，不读取聊天正文；须有 --task")
+    add.add_argument("--session-agent", choices=sorted(task_context.AGENTS), help="会话 Agent，默认事件写入者")
+    add.add_argument("--session-machine", help="会话来源机器，默认本机 machine_id")
+    add.add_argument("--session-repository", help="会话对应仓库名称或路径元数据")
+    add.add_argument("--session-worktree", help="会话 worktree 路径元数据")
+    add.add_argument("--runtime-state", choices=sorted(task_context.RUNTIME_STATES), help="明确观测的执行状态；须有来源")
+    add.add_argument("--observed-at", help="含时区的观测时间，默认追加时间")
     add.add_argument("--type", dest="event_type", required=True, choices=sorted(EVENT_TYPES))
     add.add_argument("--status", choices=sorted(STATUSES), default="active")
     add.add_argument("--topic", required=True)
@@ -1279,6 +1352,7 @@ def parser() -> argparse.ArgumentParser:
 
     hand = subparsers.add_parser("handoff", help="按任务生成可重复读取的交接视图")
     hand.add_argument("--task", required=True)
+    hand.add_argument("--to-agent", choices=sorted(task_context.AGENTS), help="准备给指定 Agent 的只读交接，仍不派发")
     hand.add_argument("--limit", type=positive_int, default=5, help="每类最多条数")
     hand.add_argument("--json", action="store_true")
     hand.set_defaults(func=command_handoff)
@@ -1291,6 +1365,15 @@ def parser() -> argparse.ArgumentParser:
     add_filters(audit)
     audit.add_argument("--stale-days", type=positive_int, default=60)
     audit.set_defaults(func=command_audit, limit=None)
+
+    review = subparsers.add_parser("review", help="按任务或来源仓库准备有预算的语义审查材料，不自动调用模型")
+    review.add_argument("--task")
+    review.add_argument("--project", help="来源仓库注册名；与 --task 同时指定时取交集")
+    review.add_argument("--limit", type=positive_int, default=20)
+    review.add_argument("--max-chars", type=positive_int, default=12000, help="整个紧凑 JSON 材料的字符预算")
+    review.add_argument("--input-findings", help="校验当前范围内 Agent 返回的 JSON 建议，不改写记忆")
+    review.add_argument("--json", action="store_true")
+    review.set_defaults(func=command_review)
     return result
 
 

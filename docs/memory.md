@@ -47,6 +47,75 @@
 记忆核心只依赖 Python 标准库和 MinIO Client（`mc`），不需要数据库、MCP Server 或本地搜索服务。
 工具环境另由 Pixi 锁定 Python 和飞书 SDK，不借用业务仓库环境。
 
+## 任务上下文与知识核验（v0.11.0）
+
+日常向 Agent 描述意图即可，例如“继续这个项目的接口重构，关联当前会话”“准备给 Claude 的交接摘要”“核对这个任务的记忆是否矛盾”。下面参数供 Agent 和集成工具使用，不要求用户手工维护。
+
+**项目、任务、会话分别命名。** `--project` 仍是本机注册的来源仓库名；`--business-project` 是 `.share/knowledge/projects/<slug>.md` 对应的业务项目，可重复。稳定 `task_id` 可跨仓库、机器和多个原生会话，会话 ID 不代替业务任务 ID。
+
+```bash
+python3 scripts/memory.py add --agent codex --project repo-a \
+  --task alpha-api --business-project alpha \
+  --session-id native-thread-id --session-repository repo-a \
+  --type progress --topic alpha/api --title "接口验证完成" \
+  --what "接口回归通过，等待下一步确认。" --where "PR 和测试输出"
+```
+
+会话参数默认使用记录者 Agent 和本机身份，跨 Agent / 跨机器引用可用 `--session-agent`、`--session-machine` 指定；`--session-worktree` 仅记录路径标签，不打开该路径或上传会话正文。会话关联必须有有效 task。旧会话不会自动扫描导入，完整聊天和凭据继续保留在原生 Agent 存储中。
+
+兼容的可选事件字段位于 `content`：
+
+```json
+{
+  "business_projects": ["alpha"],
+  "session_refs": [
+    {"agent": "codex", "machine_id": "dev-a", "session_id": "native-thread-id", "repository": "repo-a"}
+  ],
+  "agent_runtime": {
+    "agent": "codex", "machine_id": "dev-a", "session_id": "native-thread-id",
+    "state": "waiting", "observed_at": "2026-10-27T02:00:00Z"
+  }
+}
+```
+
+显式 `business_projects` 优先于该事件的既有归属推断，空数组明确保留为未归属。字段缺失时仍使用策展来源、唯一任务关联和命名空间；未整理的业务 slug 显示校验提示，不按仓库标签擅自扩散。归属修正使用新事件和 `supersedes`，不改写旧 raw；旧事件仍保留其历史来源。`-` 作为旧占位 ID 可读，但不计作业务任务，也不允许新建其生命周期。
+
+**执行状态需要明确观测。** 同时传 `--session-id`、`--runtime-state running|waiting|idle|error` 和 `--where`，可选 `--observed-at` 指定带时区的真实观测时间；未指定时使用本次写入时间。不得仅凭任务 `active` 或旧聊天推断运行状态。观测默认五分钟有效，过期、未来时间、同时间矛盾均显示未知。多会话各自保留观测，聚合徽章优先运行中，但任一新鲜等待或错误都能进入“需要关注”。它是有时效的证据，不是常驻进程探测器。
+
+**知识核验复用同名 JSON。** 保留原有 `events`，可增加以下 `knowledge` 元数据；公共 Git 中只保存模板，真实项目元数据随私有知识管理。
+
+```json
+{
+  "events": [],
+  "knowledge": {
+    "verified_at": "2026-10-27T02:00:00Z",
+    "sources": [
+      {"repository": "repo-a", "commit": "0123456789abcdef0123456789abcdef01234567", "covers": ["src/api/**", "README.md"]}
+    ]
+  }
+}
+```
+
+`covers` 是来源仓库内相对路径或 glob，不允许绝对路径、父目录穿越或 Git pathspec 指令。仅当覆盖源码相对来源提交变化（含未提交改动）才标记 `stale`；提交不同而覆盖部分没变仍可为 `current`。关联的新记录及来源事件的显式更正后继（含跨任务、跨仓库更正链）在核验时间之后出现时提示 `needs_review`。没有范围、缺少仓库、无法核验提交或元数据错误时为 `unknown`；文件修改时间不是核验时间，源码未变也不证明文档全部正确。Web 检查只读，不自动更新知识；若 Agent 需要修改共享文档，仍按共享记忆发布规则办理。
+
+**交接与语义审查是按需操作。**
+
+```bash
+python3 scripts/memory.py handoff --task alpha-api --to-agent claude --json
+python3 scripts/memory.py review --task alpha-api --limit 20 --max-chars 12000 --json
+python3 scripts/memory.py review --task alpha-api --input-findings /tmp/findings.json --json
+```
+
+交接结果含任务生命周期依据、当前本机仓库状态、会话与执行观测，状态为 `prepared`，不会派发或切换 Agent。页面可复制摘要交给目标 Agent；旧后续候选不构成新的执行授权。
+
+`review` 至少指定任务或来源仓库，可同时指定取交集。最多 50 条，默认 20 条、12000 字符；预算计算整个紧凑 JSON（Unicode 字符），包含说明、来源和遗漏计数。材料先排除显式取代记录，保留并行未裁决结论，截断与省略明确说明。CLI 不调用模型；当前 Agent 根据材料按 ID 核对完整依据后返回：
+
+```json
+{"findings":[{"category":"contradiction","event_ids":["event-a","event-b"],"summary":"两条结论冲突，需要核对当前实现。"}]}
+```
+
+类型仅限 `contradiction`、`outdated`、`duplicate`。`--input-findings` 校验当前范围、预算下准备出的候选引用及长度，返回 `needs_verification`；材料发生变化时需重新准备核对。结构校验通过不代表语义正确，空数组也不是全库无问题的证明。工具不自动删除、取代或改写记忆。
+
 ## 公共仓库结构
 
 ```text
