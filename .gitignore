@@ -19,3 +19,6 @@
 
 # Editor and OS metadata
 .DS_Store
+
+# Local project-specific watchdog code (not distributed by this repository)
+/tools/watchdog/adapters/

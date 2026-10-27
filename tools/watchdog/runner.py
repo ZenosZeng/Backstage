@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 import threading
@@ -24,15 +25,17 @@ def run(
     last_alert = {}
     pending_alerts = []
     last_hour = None
-    notifier.send_card(
-        "watchdog_started", "Watchdog 已启动", lifecycle("已启动", monitor.name)
-    )
+    if time.localtime().tm_hour not in quiet_hours:
+        notifier.send_card(
+            "watchdog_started", "Watchdog 已启动", lifecycle("已启动", monitor.name)
+        )
     print(
         f"watchdog started: pid={os.getpid()} monitor={monitor.name} poll={poll_seconds}s",
         flush=True,
     )
     try:
         while not stop.is_set():
+            delay = poll_seconds
             try:
                 alerts = monitor.check_alerts()
                 active_keys = {alert.key for alert in alerts}
@@ -80,12 +83,21 @@ def run(
                     if content and (not hasattr(monitor, "active") or monitor.active()):
                         if notifier.send_card("heartbeat", "例行状态", content):
                             last_hour = hour
+                # An adapter with a deadline may wake sooner than the periodic
+                # scan, without making idle monitors poll more frequently.
+                next_poll = getattr(monitor, "next_poll_seconds", None)
+                if next_poll is not None:
+                    seconds = float(next_poll())
+                    if not math.isfinite(seconds) or seconds < 0:
+                        raise ValueError("next_poll_seconds must be finite and nonnegative")
+                    delay = min(poll_seconds, max(0.1, seconds))
             except Exception as error:
                 print(f"watchdog scan failed: {type(error).__name__}", flush=True)
-            stop.wait(poll_seconds)
+            stop.wait(delay)
     finally:
-        notifier.send_card(
-            "watchdog_stopped", "Watchdog 已停止", lifecycle("已停止", monitor.name)
-        )
+        if time.localtime().tm_hour not in quiet_hours:
+            notifier.send_card(
+                "watchdog_stopped", "Watchdog 已停止", lifecycle("已停止", monitor.name)
+            )
         print("watchdog stopped", flush=True)
     return 0

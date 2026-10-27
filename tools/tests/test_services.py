@@ -5,6 +5,9 @@ import os
 import signal
 import subprocess
 import sys
+import importlib
+import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,8 +15,25 @@ import pytest
 
 from tools import service
 from tools.config import ROOT, atomic_json, load_env_file
-from tools.watchdog import notifier, train
-from tools.watchdog.b1k import B1kEvalMonitor
+from tools.watchdog import notifier
+from tools.watchdog.loader import ADAPTERS
+
+
+DEMO = "contract_test_" + uuid.uuid4().hex
+OTHER = DEMO + "_other"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def local_test_adapters():
+    source = Path(__file__).with_name("fixtures") / "monitor.py"
+    ADAPTERS.mkdir(parents=True, exist_ok=True)
+    paths = [ADAPTERS / f"{name}.py" for name in (DEMO, OTHER)]
+    for path in paths:
+        path.write_text(source.read_text())
+    importlib.invalidate_caches()
+    yield
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def test_atomic_private_state(tmp_path):
@@ -42,15 +62,15 @@ def test_pid_reuse_and_unrelated_process_are_rejected(tmp_path):
     atomic_json(
         tmp_path / "pid.json",
         {
-            "name": "watchdog-b1k",
+            "name": f"watchdog-{DEMO}",
             "pid": os.getpid(),
             "start_ticks": service.process_start(os.getpid()),
             "root": str(ROOT),
         },
     )
-    assert service.running_record(tmp_path, "watchdog-b1k") is None
+    assert service.running_record(tmp_path, f"watchdog-{DEMO}") is None
     with patch.object(service.os, "kill") as kill:
-        assert service.stop("watchdog-b1k", tmp_path) == 0
+        assert service.stop(f"watchdog-{DEMO}", tmp_path) == 0
         kill.assert_not_called()
 
 
@@ -115,15 +135,12 @@ def test_independent_services_start_reuse_stop(tmp_path):
         json.dumps(
             {
                 "notify": False,
-                "repo_root": str(tmp_path),
-                "log": str(tmp_path / "eval.log"),
+                "status_text": "observed",
                 "poll_seconds": 0.05,
             }
         )
     )
     env = {**os.environ, "AGENTS_LOCAL_ROOT": str(tmp_path / "local")}
-    for key in ("B1K_EVAL_CONFIG", "B1K_EVAL_LOG"):
-        env.pop(key, None)
 
     def call(kind, *args):
         return subprocess.run(
@@ -136,64 +153,29 @@ def test_independent_services_start_reuse_stop(tmp_path):
         )
 
     try:
-        for kind in ("b1k", "train"):
+        for kind in (DEMO, OTHER):
             started = call(kind, "--config", str(config))
             assert started.returncode == 0, started.stderr + started.stdout
         record = json.loads(
-            (tmp_path / "local/tools/watchdog-b1k/pid.json").read_text()
+            (tmp_path / f"local/tools/watchdog-{DEMO}/pid.json").read_text()
         )
         assert record["code_at_start"]["version"] == service.CODE_AT_START["version"]
         assert record["code_at_start"]["commit"] == service.CODE_AT_START["commit"]
-        again = call("b1k", "--config", str(config))
+        again = call(DEMO, "--config", str(config))
         assert again.returncode == 0 and "already running" in again.stdout
         assert str(record["pid"]) in again.stdout
         config.write_text(
-            json.dumps({"notify": False, "repo_root": str(tmp_path), "poll_seconds": 2})
+            json.dumps({"notify": False, "poll_seconds": 2})
         )
-        mismatch = call("b1k", "--config", str(config))
+        mismatch = call(DEMO, "--config", str(config))
         assert mismatch.returncode != 0 and "different configuration" in mismatch.stderr
-        assert call("b1k", "--stop").returncode == 0
-        state = call("train", "--status", "--json")
+        assert call(DEMO, "--stop").returncode == 0
+        state = call(OTHER, "--status", "--json")
         assert json.loads(state.stdout)["running"] is True
-        assert call("train", "--stop").returncode == 0
+        assert call(OTHER, "--stop").returncode == 0
     finally:
-        call("b1k", "--stop")
-        call("train", "--stop")
-
-
-def test_b1k_defaults_and_repo_root(tmp_path):
-    monitor = B1kEvalMonitor(repo_root=tmp_path, process_checker=lambda: False)
-    assert monitor.warning_seconds == 7200
-    assert monitor.critical_seconds == 10800
-    assert monitor.log_path.is_relative_to(tmp_path)
-    with pytest.raises(ValueError):
-        B1kEvalMonitor(warning_seconds=10, critical_seconds=1)
-
-
-def test_invalid_config_cannot_change_kubectl_readonly_command(tmp_path):
-    from tools.watchdog.__main__ import factory
-
-    with pytest.raises(ValueError, match="kubectl_args"):
-        factory("train")(
-            {"notify": False, "kubectl_args": ["delete", "pods"]},
-            tmp_path / "config.json",
-            tmp_path,
-        )
-    with pytest.raises(ValueError, match="quiet_hours"):
-        factory("b1k")(
-            {"notify": False, "quiet_hours": [24]}, tmp_path / "config.json", tmp_path
-        )
-
-
-def test_new_run_resets_stall_baseline(tmp_path):
-    path = tmp_path / "eval.log"
-    clock = [0.0]
-    path.write_text("Heartbeat: completed=100/120 failures=0\n")
-    monitor = B1kEvalMonitor(path, process_checker=lambda: True, clock=lambda: clock[0])
-    monitor.check_alerts()
-    clock[0] = 11000
-    path.write_text("Heartbeat: completed=1/120 failures=0\n")
-    assert not any(a.key.startswith("eval-stalled") for a in monitor.check_alerts())
+        call(DEMO, "--stop")
+        call(OTHER, "--stop")
 
 
 def make_notifier(monkeypatch, tmp_path):
@@ -225,22 +207,6 @@ def test_notifier_exception_never_prints_secret(monkeypatch, tmp_path, capsys):
     ):
         assert not client.send_card("failed", "test", "test")
     assert "SECRET_IN_URL" not in capsys.readouterr().out
-
-
-def test_train_dynamic_stall_without_private_patterns(tmp_path, monkeypatch):
-    import time
-
-    path = tmp_path / "jobs-dynamic-node0-host.err"
-    path.write_text(
-        "FSDP-Train: 50%|# | 50/100 [00:10:00<00:10:00, 1.00s/it, loss=0.1, lr=1.00e-05]\n"
-    )
-    os.utime(path, (time.time() - 1200,) * 2)
-    monkeypatch.setattr(train, "KJOB_LOG", tmp_path)
-    monkeypatch.setattr(train, "TRAIN_PATTERNS", [])
-    result = train.TrainMonitor()._check_stall_events(
-        {"job": {"status": "active", "exp_name": "dynamic"}}
-    )
-    assert len(result) == 1 and result[0][0] == "stalled"
 
 
 def test_remote_shutdown_kills_only_owned_child(monkeypatch, tmp_path):
@@ -364,17 +330,15 @@ def test_restart_preflight_rejects_deleted_credential_allowlist(monkeypatch, tmp
 
 def test_live_restart_keeps_pid_and_rejects_invalid_config(tmp_path):
     config = tmp_path / "monitor.json"
-    valid = {"notify": False, "repo_root": str(tmp_path), "poll_seconds": 0.05}
+    valid = {"notify": False, "poll_seconds": 0.05}
     config.write_text(json.dumps(valid))
     env = {**os.environ, "AGENTS_LOCAL_ROOT": str(tmp_path / "local")}
-    for key in ("B1K_EVAL_CONFIG", "B1K_EVAL_LOG"):
-        env.pop(key, None)
 
     def call(*args):
-        return subprocess.run([sys.executable, "-m", "tools.watchdog", "b1k", *args],
+        return subprocess.run([sys.executable, "-m", "tools.watchdog", DEMO, *args],
                               cwd=ROOT, env=env, text=True, capture_output=True, timeout=40)
 
-    record_path = tmp_path / "local/tools/watchdog-b1k/pid.json"
+    record_path = tmp_path / f"local/tools/watchdog-{DEMO}/pid.json"
     try:
         assert call("--config", str(config)).returncode == 0
         before = json.loads(record_path.read_text())
@@ -411,13 +375,11 @@ def test_landlocked_caller_requests_host_restart_without_inheriting_sandbox(tmp_
         pytest.skip("kernel does not expose Landlock")
     local = tmp_path / "local"
     config = tmp_path / "monitor.json"
-    config.write_text(json.dumps({"notify": False, "repo_root": str(tmp_path), "poll_seconds": 0.05}))
+    config.write_text(json.dumps({"notify": False, "poll_seconds": 0.05}))
     protected = tmp_path / "host-storage"
     protected.mkdir()
     env = {**os.environ, "AGENTS_LOCAL_ROOT": str(local)}
-    for key in ("B1K_EVAL_CONFIG", "B1K_EVAL_LOG"):
-        env.pop(key, None)
-    command = [sys.executable, "-m", "tools.watchdog", "b1k"]
+    command = [sys.executable, "-m", "tools.watchdog", DEMO]
 
     def call(*args):
         return subprocess.run([*command, *args], cwd=ROOT, env=env,
@@ -449,7 +411,7 @@ def denied():
  except OSError as e:assert e.errno==errno.EACCES
  else:raise AssertionError('caller unexpectedly gained host write permission')
 denied()
-result=subprocess.run([sys.executable,'-m','tools.watchdog','b1k','--restart','--restart-timeout','15'],
+result=subprocess.run([sys.executable,'-m','tools.watchdog',sys.argv[3],'--restart','--restart-timeout','15'],
                       text=True,capture_output=True)
 assert result.returncode==0,result.stderr
 denied()
@@ -457,9 +419,9 @@ print('DENIED before/after; host restart ready')
 '''
     try:
         assert call("--config", str(config)).returncode == 0
-        record_path = local / "tools/watchdog-b1k/pid.json"
+        record_path = local / f"tools/watchdog-{DEMO}/pid.json"
         before = json.loads(record_path.read_text())
-        requested = subprocess.run([sys.executable, "-c", script, str(local), str(protected / "denied")],
+        requested = subprocess.run([sys.executable, "-c", script, str(local), str(protected / "denied"), DEMO],
                                    cwd=ROOT, env=env, capture_output=True, text=True, timeout=40)
         assert requested.returncode == 0, requested.stderr
         assert "DENIED before/after" in requested.stdout

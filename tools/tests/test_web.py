@@ -15,7 +15,9 @@ from tools.web.data import Workspace
 
 
 @pytest.fixture
-def workspace(tmp_path):
+def workspace(tmp_path, monkeypatch):
+    from tools.watchdog import loader
+    monkeypatch.setattr(loader, "available_adapters", lambda: ["demo", "unused"])
     root = tmp_path / ".agents"
     root.mkdir()
     (root / "config.json").write_text(json.dumps({
@@ -141,7 +143,7 @@ def test_no_write_control_or_rebinding_routes(server):
 
 
 def test_monitor_uses_existing_once_without_notifications(workspace, monkeypatch):
-    config = workspace.local / "config/watchdog-train.json"
+    config = workspace.local / "config/watchdog-demo.json"
     config.parent.mkdir(parents=True)
     config.write_text('{"notify":true}')
     calls = []
@@ -150,11 +152,54 @@ def test_monitor_uses_existing_once_without_notifications(workspace, monkeypatch
         return subprocess.CompletedProcess(command, 0, '{"status":"step 10/100, loss 0.2"}')
     monkeypatch.setattr(subprocess, "run", run)
     before = config.read_bytes()
-    assert "step 10" in workspace.monitor("train")["status"]
+    assert "step 10" in workspace.monitor("demo")["status"]
     assert "--once" in calls[0][0] and "--no-notify" in calls[0][0]
     assert calls[0][1]["env"]["AGENTS_LOCAL_ROOT"] == str(workspace.local)
     assert config.read_bytes() == before
-    assert workspace.monitor("b1k")["configured"] is False
+    assert workspace.monitor("unused")["configured"] is False
+
+
+def test_monitor_list_discovers_local_adapters_and_orphaned_configs(workspace, server, monkeypatch):
+    config = workspace.local / "config/watchdog-missing.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{}')
+    (config.parent / "watchdog-invalid!.json").write_text('{}')
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("listing must not collect"))
+    items = {item["name"]: item for item in fetch(server, "/api/monitors")["items"]}
+    assert set(items) == {"demo", "unused", "missing"}
+    assert items["demo"] == {"name": "demo", "adapter": "demo", "available": True, "configured": False}
+    assert items["missing"] == {"name": "missing", "adapter": "missing", "available": False, "configured": True}
+    assert fetch(server, "/api/monitor?kind=missing")["state"] == "unavailable"
+
+
+def test_monitor_instance_can_select_another_local_adapter(workspace, monkeypatch):
+    config = workspace.local / "config/watchdog-nightly.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"adapter":"demo"}')
+    item = next(item for item in workspace.monitors()["items"] if item["name"] == "nightly")
+    assert item["adapter"] == "demo" and item["available"] and item["configured"]
+    commands = []
+    def run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '{"status":"ready"}')
+    monkeypatch.setattr(subprocess, "run", run)
+    assert workspace.monitor("nightly")["status"] == "ready"
+    assert commands[0][3] == "nightly"
+
+
+@pytest.mark.parametrize("name", ["unknown", "../secret", "demo/other", "demo!"])
+def test_monitor_rejects_uninstalled_or_invalid_names(workspace, name):
+    with pytest.raises(ValueError):
+        workspace.monitor(name)
+
+
+@pytest.mark.parametrize("payload", ["not JSON", "{}", "[]", '{"status":null}', '{"status":[]}'])
+def test_invalid_collector_payload_is_unavailable(workspace, monkeypatch, payload):
+    config = workspace.local / "config/watchdog-demo.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{}')
+    monkeypatch.setattr(subprocess, "run", lambda command, **_: subprocess.CompletedProcess(command, 0, payload))
+    assert workspace.monitor("demo")["state"] == "unavailable"
 
 
 def cluster_fixture(workspace, *, at=1000, state="collecting"):
@@ -268,19 +313,18 @@ def test_cluster_api_preserves_host_and_read_only_boundaries(server):
     assert exc.value.code == 405
 
 
-def test_train_collection_error_is_unavailable_not_empty(workspace, monkeypatch, tmp_path):
-    executable = tmp_path / "kubectl"
-    executable.write_text('#!/bin/sh\necho "private cluster error" >&2\nexit 1\n')
-    executable.chmod(0o700)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    config = workspace.local / "config/watchdog-train.json"
+def test_collection_error_is_unavailable_not_empty(workspace, monkeypatch):
+    config = workspace.local / "config/watchdog-demo.json"
     config.parent.mkdir(parents=True)
-    config.write_text(json.dumps({"repo_root": str(tmp_path), "notify": False}))
-    data = workspace.monitor("train")
+    config.write_text('{}')
+    monkeypatch.setattr(subprocess, "run", lambda command, **_: subprocess.CompletedProcess(
+        command, 1, "", "private collection error"))
+    data = workspace.monitor("demo")
     assert data["state"] == "unavailable"
-    assert "private cluster" not in json.dumps(data)
-    executable.write_text('#!/bin/sh\nprintf \'{"items":[]}\'\n')
-    assert workspace.monitor("train")["state"] == "no_data"
+    assert "private collection" not in json.dumps(data)
+    monkeypatch.setattr(subprocess, "run", lambda command, **_: subprocess.CompletedProcess(
+        command, 0, '{"status":""}'))
+    assert workspace.monitor("demo")["state"] == "no_data"
 
 
 def test_data_errors_are_visible_instead_of_healthy_empty_state(workspace):
@@ -321,15 +365,16 @@ def test_services_compare_start_metadata_and_preserve_unknown_old_records(worksp
     def record(directory, name):
         if name=="claude-feishu":
             return {"pid": 123, "ready": True, "code_at_start": {"version": "0.7.1", "commit": "old", "dirty": False}}
-        if name=="watchdog-train":
+        if name=="watchdog-demo":
             return {"pid": 124, "ready": True}  # 部署前的旧记录
         return None
     monkeypatch.setattr(service, "running_record", record)
+    monkeypatch.setattr(service, "service_names", lambda root=None: ("claude-feishu", "watchdog-demo"))
     data = workspace.services()
     items = {item["name"]: item for item in data["items"]}
     assert items["claude-feishu"]["code_changed"] is True
-    assert items["watchdog-train"]["code_at_start"] is None
-    assert items["watchdog-train"]["code_changed"] is None
+    assert items["watchdog-demo"]["code_at_start"] is None
+    assert items["watchdog-demo"]["code_changed"] is None
 
 
 def test_disconnected_client_does_not_trigger_a_second_error_response(workspace):
@@ -466,7 +511,7 @@ def test_concurrent_expired_snapshot_is_rebuilt_only_once(workspace, monkeypatch
 
 @pytest.mark.parametrize('outcome,state', [('empty', 'no_data'), ('failed', 'unavailable'), ('timeout', 'unavailable')])
 def test_monitor_scope_source_sampling_and_unavailable_are_explicit(workspace, monkeypatch, outcome, state):
-    config = workspace.local / 'config/watchdog-train.json'
+    config = workspace.local / 'config/watchdog-demo.json'
     config.parent.mkdir(parents=True)
     config.write_text('{}')
     def run(command, **_):
@@ -474,11 +519,11 @@ def test_monitor_scope_source_sampling_and_unavailable_are_explicit(workspace, m
             raise subprocess.TimeoutExpired(command, 45)
         return subprocess.CompletedProcess(command, 1 if outcome == 'failed' else 0, '{"status":""}')
     monkeypatch.setattr(subprocess, 'run', run)
-    data = workspace.monitor('train')
+    data = workspace.monitor('demo')
     assert data['state'] == state and data['scope'] == 'local'
     assert data['source'] == str(config)
     assert data['sampled_at'] and '--no-notify' in data['collector']
-    assert workspace.monitor('b1k')['state'] == 'unconfigured'
+    assert workspace.monitor('unused')['state'] == 'unconfigured'
 
 
 def test_search_matches_cli_ranking_and_explicit_time_sort(workspace):

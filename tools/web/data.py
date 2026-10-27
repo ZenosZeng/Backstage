@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import posixpath
+import re
 import subprocess
 import sys
 import threading
@@ -506,7 +507,7 @@ class Workspace:
         items = []
         from scripts.doctor import code_identity
         installed = code_identity(service.ROOT)
-        for name in service.SERVICES:
+        for name in service.service_names(self.local):
             directory = self.local / "tools" / name
             record = service.running_record(directory, name)
             started = record.get("code_at_start") if record else None
@@ -526,14 +527,45 @@ class Workspace:
         return {"items": items, "installed_code": installed, "scope": "local", "sampled_at": timestamp(datetime.now().timestamp()),
                 "read_at": timestamp(datetime.now().timestamp())}
 
+    def monitors(self):
+        """List local adapter names/configuration without importing project code."""
+        from tools.watchdog.loader import available_adapters
+
+        available = set(available_adapters())
+        configured = {path.name[len("watchdog-"):-len(".json")]
+                      for path in (self.local / "config").glob("watchdog-*.json")
+                      if path.is_file()}
+        names = sorted(name for name in available | configured
+                       if re.fullmatch(r"[a-z][a-z0-9_]*", name))
+        items = []
+        for name in names:
+            adapter = name
+            if name in configured:
+                try:
+                    config = json.loads((self.local / "config" / f"watchdog-{name}.json").read_text())
+                    adapter = config.get("adapter", name) if isinstance(config, dict) else None
+                except (OSError, ValueError):
+                    adapter = None
+            if not isinstance(adapter, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", adapter):
+                adapter = None
+            items.append({"name": name, "adapter": adapter, "available": adapter in available,
+                          "configured": name in configured})
+        return {"items": items, "scope": "local"}
+
     def monitor(self, kind: str):
-        if kind not in {"train", "b1k"}:
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", kind):
+            raise ValueError("未知监控类型")
+        item = next((item for item in self.monitors()["items"] if item["name"] == kind), None)
+        if item is None:
             raise ValueError("未知监控类型")
         config = self.local / "config" / f"watchdog-{kind}.json"
-        data = {"configured": config.is_file(), "scope": "local", "source": str(config),
+        data = {"configured": config.is_file(), "available": item["available"],
+                "scope": "local", "source": str(config),
                 "collector": f"watchdog-{kind} --once --no-notify"}
         if not data["configured"]:
             data.update(state="unconfigured", status="本机尚未配置此监控")
+        elif not item["available"]:
+            data.update(state="unavailable", error="本机未安装此监控的 adapter")
         else:
             # Reuse the read-only CLI in isolation; never send or save cursors.
             try:
@@ -546,9 +578,14 @@ class Workspace:
                     data.update(state="unavailable", error="监控读取失败，请检查本机监控配置与日志")
                 else:
                     payload = json.loads(result.stdout)
-                    data.update(state="available" if payload["status"] else "no_data", status=payload["status"])
+                    status = payload["status"]
+                    if not isinstance(status, str):
+                        raise ValueError("invalid monitor status")
+                    data.update(state="available" if status else "no_data", status=status)
             except subprocess.TimeoutExpired:
                 data.update(state="unavailable", error="监控读取超时，请检查采集环境后刷新")
+            except (OSError, ValueError, KeyError, TypeError):
+                data.update(state="unavailable", error="监控读取失败，请检查本机监控配置与日志")
         data.update(sampled_at=timestamp(datetime.now().timestamp()))
         data["read_at"] = data["sampled_at"]
         return data

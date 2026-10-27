@@ -1,103 +1,54 @@
 # 工作区工具
 
-这些是旁路工具，不依赖业务仓库的 Python 环境。watchdog 只读日志、结果 JSON
-和进程/Kubernetes 状态，不启动、停止或修改训练、仿真、推理和评分。
-Claude 飞书遥控是另一项独立服务，不与监控告警共用进程或凭据。
-集群资源由独立的 `cluster-monitor` 采集，经 SSH 读取已配置机器的状态并保存本机快照；
-配置与采集进程独立于业务 watchdog，见 [集群监控说明](cluster/README.md)。
+这些旁路工具独立于业务仓库的 Python 环境。监控框架负责轮询、通知、去重和进程管理，
+项目状态解析与告警规则由本机 adapter 提供。监控只观察，不启停训练、仿真、推理或评分。
 
-`pixi run web` 启动本机只读工作台，浏览项目、记忆时间线、文档和运行快照；
-没有网页遥控。见 [工作台说明](web/README.md)。
+所有 watchdog 在一个常驻 Coder workspace 维护和运行；adapter 可以通过 SSH 读取远端状态，
+也可以读取可访问的日志。远端无需部署 watchdog，也不维护 adapter 分发或同步机制。
+私有 adapter 保存在 Git 忽略的 `tools/watchdog/adapters/`，详见 [Watchdog 接入说明](watchdog/README.md)。
+
+Claude 飞书遥控是独立服务，使用 App 凭据处理用户指令；watchdog 使用 webhook 发送状态卡片，
+两者不共用进程或凭据。集群资源由独立的 `cluster-monitor` 经 SSH 采集并保存本机快照，
+见 [集群监控说明](cluster/README.md)。`pixi run web` 启动只读工作台，页面不提供遥控入口，
+见 [工作台说明](web/README.md)。
 
 ## 安装与启动
 
 ```bash
 cd ~/code/.agents
 pixi install --locked
-pixi run watchdog-b1k
-pixi run watchdog-train
+# 先创建本机 demo adapter 和配置，再按需启动
+pixi run watchdog demo --once --no-notify
+pixi run watchdog demo
 pixi run tools-status
 ```
 
-两个 watchdog 和集群采集按需启动，不要求在同一台机器运行。默认后台化，SSH 断开仍运行。
-同名服务只允许一个实例；修改配置后通过 `--restart` 校验并重载。无需 sudo、tmux 或业务环境。
+服务默认后台运行，同名服务只允许一个实例；配置变化后用 `--restart` 校验并重载。
+无需 sudo、tmux 或业务环境。工具服务统一支持 `--status`、`--stop`、`--restart`、
+`--once`、`--foreground` 和 `--config PATH`。
 
 ```bash
-pixi run watchdog-b1k --status
-pixi run watchdog-b1k --stop
-pixi run watchdog-train --once
-pixi run watchdog-b1k --foreground --no-notify
+pixi run watchdog demo --status
+pixi run watchdog demo --stop
+pixi run watchdog demo --foreground --no-notify
 ```
 
-工具服务统一支持 `--status`、`--stop`、`--restart`、`--once`、`--foreground` 和 `--config PATH`。
-`--once` 是无通知、无常驻进程的配置与只读状态检查；遥控的 `--once` 不连接飞书或运行 Claude。
-集群采集的 `--once` 只校验配置、读取已有快照，不连接 SSH、不探活端口；开始采集需显式启动服务。
-`--no-notify` 仅禁用 watchdog 消息，不是暂停遥控指令的开关。
-PID 身份通过启动时间、命令、工作目录核验；不会用宽泛 `pkill` 停止其他服务。
+`--once` 是无通知、无常驻进程的配置与只读状态检查，不保存监控游标。
+遥控的 `--once` 不连接飞书或运行 Agent；集群采集的 `--once` 只读取已有快照，
+不连接 SSH、不探活端口。`--no-notify` 仅禁用 watchdog 消息，不控制独立遥控服务。
+PID 身份通过启动时间、命令和工作目录核验，不用宽泛 `pkill` 停止其他服务。
 
 ## 本机配置
 
-模板在 `tools/config/`；私有配置放 `.local/config/<服务名>.json`，不进 Git/S3。
-没有配置时，默认 workspace 来自根目录 `config.json`，否则采用 `.agents` 的父目录。
-模板中的 `~/code` 只是示例，可以改成其他工作区。相对路径以配置文件所在目录为基准。
+公共模板在 `tools/config/`，真实配置放 `.local/config/<服务名>.json`，不进 Git/S3。
+相对路径以配置文件所在目录为基准；业务字段由本机 adapter 解释。
 
-| 服务 | 可选字段 |
+| 服务 | 配置入口 |
 |---|---|
-| watchdog-b1k | `repo_root`、`log`、`eval_config` |
-| watchdog-train | `repo_root`、`log_root`、`kubectl_args`、`experiments`、`native_runs` |
-| cluster-monitor | 必填 `hosts`；可选 `interval_seconds`、`health_interval_seconds`、`ports`，见 [字段说明](cluster/README.md#本机配置) |
-| claude-feishu | `credentials_file`、`workdir`、`claude_cli`、`dsh_cli`、`claude_model_name`、`dsh_model_name`、`timeout_seconds`、`dsh_timeout_seconds`、`permission_profile` |
-
-B1K 默认查找 `scripts/eval/{fleet,0srv16sim,2srv14sim,8srv8sim}/eval.log` 中最新日志。
-自定义请求建议显式指定 `log` 和 `eval_config`；兼容 `B1K_EVAL_LOG` / `B1K_EVAL_CONFIG`，
-但 JSON 显式字段优先。汇总只读当前 TOML 选中的 summary，保留 EMA/raw、namespace、horizon/steps 区别。
-存活检查按日志头的 `Config:`（缺失时用 `eval_config`）匹配进程的 `--config`，
-其他评测进程不会掩盖当前 run 退出；切换日志时重新建立进度与停滞基线。
-
-Pi 默认查找 workspace 的 `Pi_b1k`（存在时）或 `Pi`，读取其 `kjob_logs/`。
-`kubectl_args` 可配置 context/namespace，例如 `["--context", "cluster", "-n", "training"]`。
-实验优先通过 Kubernetes job 的提交脚本注解识别；历史串行启动器可在本机
-`experiments` 填 `["显示名", "*日志匹配字段*"]`，不把实验清单写入通用代码。
-保留训练 step/loss/ETA、离线评测状态与子日志活跃度、失败日志、停滞检测。
-
-susser-tod 原生 Pi05 训练通过本机配置 `native_runs` 接入，和旧 Pi 日志格式可以并存：
-
-```json
-{
-  "repo_root": "~/code/susser-tod",
-  "kubectl_args": ["-n", "training"],
-  "native_runs": [
-    {"artifact_dir": "~/code/artifacts/my-training-run", "producers_per_node": 4}
-  ]
-}
-```
-
-`artifact_dir` 采用已有发射产物：`consumer/producer-job-name.txt`、
-`consumer/producer-launch-id.txt` 和 `logs/<launch-id>/<role>-node_<index>.log`。
-每轮按文件中的确切 Job/launch 识别；续训后更新这些发射产物即可，无需把实验名写进通用代码。
-完整 artifact 目录用于区分 run，同名目录仍分别统计；卡片继续使用目录名显示。
-consumer 节点数/每节点 GPU 数来自 Kubernetes；producer 每节点进程数来自本机配置，
-节点 Ready 不等于每个 Python 进程存活，是否持续训练以 rank 0 的 step 为依据。
-总步数与 epoch 从发射预检日志读取，步速用最近 50 个 rank 0 日志窗口的均值。
-只追加读取原生日志，游标保存在已有 `cursors.json`，重载后保留预算及 checkpoint 保存记录。
-
-原生训练停滞按最后一次 step 的日志时间判断，其他日志持续刷屏不能掩盖停滞。
-尚未产出第一个 step 时不触发进度停滞告警；此时用 Job 状态及异常日志判断启动故障。
-producer 重试增加发橙色提醒，Job 的 `Failed/FailureTarget` 才判终止；
-部分节点完成不等于整个 Job 完成。供数的坏图像重采样与弃用警告不报训练失败。
-卡片中的 full/raw/EMA checkpoint 只表示保存日志完成，不替代 S3 payload/metadata 验收。
-原生训练的提醒阈值建议短于该 run 的供数等待超时，同时为正常 checkpoint 保存留出时间。
-配置/代码更新可用 `pixi run watchdog-train --restart` 热重载；不会重启训练或 producer。
-
-共用监控设置：`poll_seconds=60`；整点发送例行状态；默认 0-7 点和 13 点静默，告警不静默。
-B1K 停滞提醒/严重阈值为 7200/10800 秒；Pi 为 900/3600 秒，可通过
-`stall_warning_seconds` / `stall_critical_seconds` 调整。
-Fleet 日志默认使用 900/3600 秒，告警每分钟检查。正式多机评测前应显式设置
-`log` 为 fleet 的 `eval.log`、`eval_config` 为本次 TOML，重启 watchdog 后检查 `--status`。
-七类卡片为任务开始、完成、故障、停滞、整点状态、监控启动、监控停止。
-同内容成功发送后 600 秒去重；HTTP 200 仍检查业务 `code == 0`。
-发送失败的任务事件在下一轮重试；训练待发事件保存在现有 `cursors.json`，
-B1K 待发事件保留在监控进程内。持续告警仍按配置间隔限流。
+| interaction | `.local/config/interaction.json`，两分钟提醒及本机问答见 [无人值守交互](watchdog/README.md#无人值守交互) |
+| watchdog | `.local/config/watchdog-<实例名>.json`，通用字段及 adapter 接口见 [接入说明](watchdog/README.md) |
+| cluster-monitor | 必填 `hosts`；采集周期和端口配置见 [字段说明](cluster/README.md#本机配置) |
+| claude-feishu | 凭据文件、工作目录、CLI、超时和权限档，见公共模板及下文 |
 
 ## 飞书凭据
 
@@ -138,6 +89,9 @@ pixi run claude-feishu --stop
 | `/restart` | 校验新代码/配置，由宿主 bridge 自行重载；保持会话，就绪后回复原消息 |
 | `/cd <目录>` | 切换该会话的工作目录 |
 | `/cost` | 当前 harness 累计轮次、输出 token、时长；DSH 不报告成本 |
+| `/questions` | 列出本机待决策问题 |
+| `/answer <id> <回答>` | 写回交互文档，Agent 忙碌时仍可回答 |
+| `/cancel-question <id>` | 取消问题并停止提醒 |
 | `/queue <指令>` | 排队执行（当前任务结束后自动开始，上限 5 条） |
 
 执行中发「停」「停止」「打断」「取消」「stop」「cancel」打断当前任务；发其他内容会
@@ -170,7 +124,7 @@ pixi run claude-feishu --stop
 集群监控的私有配置、快照、SSH 配置与密钥均仅本机，不通过 Git/S3 发布。
 旧独立 `cluster-monitor` 的切换须先停止旧采集，再启动 Backstage 采集，避免重复采样；
 原仓库保留历史、不删除，后续代码维护以 Backstage `tools/cluster/` 为入口，见 [迁移说明](cluster/README.md#从独立-cluster-monitor-迁移)。
-Pi 训练和 B1K 评测沿用现有 watchdog，GOAI 的独立 watchdog 不在本轮范围内。
+业务监控由本机 adapter 接入；公共仓库不维护实验清单、业务路径或项目日志协议。
 
 ## 验证
 
@@ -180,6 +134,6 @@ pixi run -e dev test
 pixi run -e dev lint
 ```
 
-测试使用 mock 飞书、合成业务数据、隔离的临时服务；不访问 GPU，不启动训练/评测。
-`b1k_layout.py` 是只读产物路径协议适配，不依赖 evaluator 模块；业务路径协议变动时须同步测试此适配。
+公共测试使用 mock 飞书、临时 fake adapter 和隔离服务，不依赖被 Git 忽略的项目代码。
+业务 adapter 的测试与其私有代码一起维护，不访问 GPU，不启动训练或评测。
 `lint` 只启用 `E9,F63,F7,F82`（语法错误、未定义名一类），不代表完整风格检查；要更严的规则需显式 `--select`。

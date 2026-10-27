@@ -106,7 +106,7 @@ async function showTaskTool(kind, task, epoch) {
   } catch(error) {if(epoch===renderEpoch && request===toolEpoch) $('#task-tool-output').innerHTML=`<p class="inline-error">${escape(error.message)}</p>`;}
 }
 function serviceCards(items) {
-  const names = {'claude-feishu':'Feishu Bridge','watchdog-train':'训练监控','watchdog-b1k':'B1K 评测监控','cluster-monitor':'集群资源采集'};
+  const names = {'claude-feishu':'Feishu Bridge','cluster-monitor':'集群资源采集'};
   return items.map(s => `<div class="service-card"><div class="service-top"><span class="service-icon">${icon(s.name === 'claude-feishu' ? 'memory' : 'runtime')}</span>${tag(s.running ? (s.ready ? '就绪' : '进程运行中') : '未运行', s.running && s.ready ? 'green' : '')}</div><h3>${escape(names[s.name] || s.name)}</h3><p>${s.running ? `PID ${s.pid} · ${s.name === 'claude-feishu' ? (s.ready ? 'WebSocket 已连接' : '连接未就绪') : s.name === 'cluster-monitor' ? '集群资源采集进程' : '本机监控进程'}` : s.configured ? '本机已有配置，当前进程未运行' : '本机未发现运行进程'}</p>${s.running ? `<p class="service-version">启动版本：${escape(s.code_at_start?.version || '未知（旧记录）')}<br><code>${escape(s.code_at_start?.commit?.slice(0,12) || '无启动提交记录')}</code><br>${s.code_changed === true ? '启动后源码已变化' : s.code_changed === false ? '与本机源码版本一致' : '版本差异待核对'}</p>` : ''}</div>`).join('');
 }
 const dayMs = 86400000;
@@ -249,17 +249,19 @@ async function showRuntime(params, epoch) {
     return;
   }
   if(tab==='services') return showLocalServices(epoch);
-  $('#runtime-content').innerHTML=`<div class="runtime-scope"><span>范围：已配置的本机监控</span><span>手动读取 · 不启停训练或评测</span></div><div class="monitor-grid">${[['train','训练 / 离线评测','TRAINING'],['b1k','B1K 评测','EVALUATION']].map(([kind,title,label])=>`<section class="panel monitor-panel"><div class="panel-heading"><h2>${title}</h2><span>${label}</span></div><div id="monitor-${kind}" class="loading">正在读取已配置监控…</div></section>`).join('')}</div>`;
-  await Promise.all(['train','b1k'].map(async kind=>{
+  const monitors=await api('monitors');
+  if(epoch!==renderEpoch) return;
+  $('#runtime-content').innerHTML=`<div class="runtime-scope"><span>范围：本机 adapter 与配置</span><span>手动读取 · 不启停训练或评测</span></div><div class="monitor-grid">${monitors.items.length?monitors.items.map((item,index)=>`<section class="panel monitor-panel"><div class="panel-heading"><h2>${escape(item.name)}</h2><span>WATCHDOG</span></div><div id="monitor-${index}" class="loading">正在读取已配置监控…</div></section>`).join(''):'<section class="panel monitor-panel"><h2>尚未安装监控 adapter</h2><p>在本机 watchdog/adapters 目录添加 adapter，并填写对应的私有配置。</p></section>'}</div>`;
+  await Promise.all(monitors.items.map(async (item,index)=>{
     try {
-      const data=await api('monitor',{kind});
+      const data=await api('monitor',{kind:item.name});
       if(epoch!==renderEpoch) return;
-      const panel=$(`#monitor-${kind}`);
+      const panel=$(`#monitor-${index}`);
       panel.className='monitor-content';
       panel.innerHTML=data.error?`<div class="inline-error">${escape(data.error)}</div>`:!data.configured?`<div class="monitor-empty"><span class="muted-dot status-dot"></span><h3>尚未配置</h3><p>接入现有 watchdog 配置后，可在这里读取状态。</p></div>`:`<pre class="monitor-status">${escape(data.status || '本次采集未返回活跃任务详情。')}</pre>`;
       panel.insertAdjacentHTML('beforeend',`<div class="sample-meta"><span>范围：本机 · ${escape({available:'有采集结果',unconfigured:'未配置',unavailable:'不可用',no_data:'无数据'}[data.state] || '状态未知')}</span><span>采样时间：${when(data.sampled_at)}</span><span>来源：${escape(data.collector)}</span><code>${escape(data.source)}</code></div>`);
     } catch(error) {
-      if(epoch===renderEpoch) {$(`#monitor-${kind}`).className='monitor-content';$(`#monitor-${kind}`).innerHTML=`<div class="inline-error">${escape(error.message)}</div>`;}
+      if(epoch===renderEpoch) {$(`#monitor-${index}`).className='monitor-content';$(`#monitor-${index}`).innerHTML=`<div class="inline-error">${escape(error.message)}</div>`;}
     }
   }));
   if(epoch===renderEpoch) $('#last-read').textContent='训练与评测 · 本机只读快照 · 手动刷新';

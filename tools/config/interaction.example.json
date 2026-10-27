@@ -1,0 +1,6 @@
+{
+  "label": "等待用户决策",
+  "poll_seconds": 120,
+  "notify": true,
+  "credentials_file": "~/.config/feishu-webhook/env"
+}

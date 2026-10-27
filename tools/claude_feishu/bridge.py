@@ -33,6 +33,7 @@ from typing import Callable
 from tools.claude_feishu import harness, presentation, runner
 from tools.claude_feishu.sessions import SessionStore
 from tools.claude_feishu.presentation import CARD_BODY_MAX
+from tools.watchdog.interaction import Queue as DecisionQueue
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 HOME_DIR = pathlib.Path.home()
@@ -575,11 +576,15 @@ HELP_TEXT = (
     "- `/cd <目录>` 切换工作目录\n"
     "- `/cost` 本会话累计成本与轮次\n"
     "- `/queue <指令>` 排队执行（当前任务结束后自动开始）\n"
+    "- `/questions` 查看待决策问题\n"
+    "- `/answer <id> <回答>` 记录回答，原 Agent 读取后继续\n"
+    "- `/cancel-question <id>` 取消待决策问题\n"
     "- `/help` 本帮助\n\n"
     "**执行中**\n"
     "- 发「停」「停止」「打断」「取消」「stop」「cancel」→ 打断当前任务\n"
     "- 其他消息会提示忙；想接着干活用 `/queue <指令>`\n"
     "- 排队指令按执行时的 harness 运行\n"
+    "- 决策命令在任务执行中也可使用，只更新本机队列，由原 Agent 读取回答\n"
     "- DSH 按 commit 块刷新，无逐字流式，也不报告成本\n"
     f"- Claude 最长 {EXEC_TIMEOUT // 60} 分钟，DSH 最长 {DSH_TIMEOUT // 60} 分钟；进度卡片每 {STREAM_INTERVAL}s 原地刷新"
 )
@@ -753,6 +758,61 @@ def _cmd_restart(data, arg=""):
         _lock.release()
 
 
+def _cmd_decision(data: P2ImMessageReceiveV1, cmd: str, arg: str) -> None:
+    """Record an authorized human decision without executing it in a harness."""
+    usage = {
+        "/questions": "用法：`/questions`，列出本机待决策问题。",
+        "/answer": "用法：`/answer <id> <回答>`，回答不能为空。",
+        "/cancel-question": "用法：`/cancel-question <id>`。",
+    }
+    if cmd == "/questions":
+        if arg:
+            _send_reply(data, usage[cmd])
+            return
+    elif cmd == "/answer":
+        parts = arg.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip():
+            _send_reply(data, usage[cmd])
+            return
+    elif not arg or len(arg.split()) != 1:
+        _send_reply(data, usage[cmd])
+        return
+
+    sender = getattr(getattr(data.event.sender, "sender_id", None), "open_id", "") or ""
+    actor = f"feishu:{sender}"
+    try:
+        queue = DecisionQueue()
+        if cmd == "/questions":
+            pending = queue.pending()
+            if not pending:
+                _send_reply(data, "当前没有待决策问题。")
+                return
+            lines = [f"**待决策问题（{len(pending)} 项）**"]
+            for item in pending:
+                lines.append(f"\n`{item['id']}` · Agent：{item.get('agent') or '未指定'}")
+                if item.get("task"):
+                    lines.append(f"任务：{item['task']}")
+                lines.append(str(item["question"]))
+                if item.get("context"):
+                    lines.append(f"背景：{item['context']}")
+                if item.get("options"):
+                    lines.append("选项：" + "；".join(item["options"]))
+                lines.append(f"回答：/answer {item['id']} <回答>")
+            _send_reply(data, "\n".join(lines))
+        elif cmd == "/answer":
+            queue.answer(parts[0], parts[1].strip(), actor=actor)
+            _send_reply(data, "✅ 已记录回答，原 Agent 读取后继续。")
+        else:
+            queue.cancel(arg, actor=actor)
+            _send_reply(data, "✅ 已取消问题，原 Agent 读取后处理。")
+    except KeyError:
+        _send_reply(data, "❌ 问题不存在或已处理，请用 /questions 查看当前待决策问题。")
+    except ValueError:
+        _send_reply(data, "❌ 无法处理此问题，请用 /questions 核对问题 ID 和状态。")
+    except OSError:
+        _send_reply(data, "⚠️ 决策队列暂时不可用，请稍后重试。")
+
+
 def _handle_command(data: P2ImMessageReceiveV1, text: str, chat_id: str) -> bool:
     """命令拦截；返回 True 表示已处理、不再进 claude。"""
     if not text.startswith("/"):
@@ -760,6 +820,9 @@ def _handle_command(data: P2ImMessageReceiveV1, text: str, chat_id: str) -> bool
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
+    if cmd in ("/questions", "/answer", "/cancel-question"):
+        _cmd_decision(data, cmd, arg)
+        return True
     if _restart_pending.is_set() and cmd not in ("/status", "/help", "/h", "/?"):
         _send_reply(data, "🔄 bridge 正在重启，就绪后再发送指令。")
         return True

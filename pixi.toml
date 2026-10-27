@@ -1,6 +1,6 @@
 [workspace]
 name = "agent-workspace"
-version = "0.11.0"
+version = "0.12.0"
 description = "Memory, monitoring and remote Agent tools"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
@@ -16,8 +16,8 @@ markdown-it-py = ">=3, <4"
 memory = "python scripts/memory.py"
 sync = "python scripts/sync.py"
 memory-eval = "python scripts/evaluate_memory.py"
-watchdog-b1k = "python -m tools.watchdog b1k"
-watchdog-train = "python -m tools.watchdog train"
+watchdog = "python -m tools.watchdog"
+interaction = "python -m tools.watchdog.interaction"
 cluster-monitor = "python -m tools.cluster"
 claude-feishu = "python -m tools.claude_feishu"
 tools-status = "python -m tools.service --all-status"
