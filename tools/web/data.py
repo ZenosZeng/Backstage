@@ -278,14 +278,16 @@ class Workspace:
                                  "state": snap["tasks"].get(key, {}).get("state", "unknown")}
                                  for key in sorted(all_tasks - assigned_tasks)[:20]] if knowledge else []},
                 "attention": attention[:8], "attention_count": len(attention),
-                "task_detail": self._task_detail(snap, task, selected_ids) if task else None,
+                "task_detail": self._task_detail(snap, task) if task else None,
                 "sampled_at": snap["overview"]["sampled_at"],
                 "project_mode": snap["overview"]["project_mode"], "errors": snap["errors"]}
 
     @staticmethod
-    def _task_detail(snap, task, selected_ids):
+    def _task_detail(snap, task):
+        # Membership was checked above; a stable task can span business projects.
+        # Its current conclusions share the same scope as sessions and handoff.
         related = [e for e in snap["events"] if e.get("task_id") == task
-                   and e["event_id"] in selected_ids and e["event_id"] not in snap["replaced"]
+                   and e["event_id"] not in snap["replaced"]
                    and e["status"] != "superseded" and "task_state" not in e["content"]]
         def entries(kinds, attention=False):
             selected = [e for e in related if e["event_type"] in kinds
@@ -301,6 +303,8 @@ class Workspace:
     def _knowledge_projects(self, events, documents, errors):
         """Use curated evidence, not a union of overlapping repository tags."""
         projects, membership, task_projects = {}, {}, {}
+        replaced = {key for event in events for key in event.get("supersedes", [])}
+        event_index = {event["event_id"]: event for event in events}
         directory = self.root / ".share/knowledge/projects"
         available = {d["path"] for d in documents}
         for home in sorted(directory.glob("*.md")):
@@ -340,11 +344,18 @@ class Workspace:
                         event = raw.get("event", raw)  # Both existing knowledge export formats.
                         if event.get("event_id"):
                             membership.setdefault(event["event_id"], set()).add(name)
-                        if event.get("task_id") and event["task_id"] != "-":
-                            task_projects.setdefault(event["task_id"], set()).add(name)
+                        # Keep historical membership, but never inherit a task
+                        # assignment from an explicitly obsolete source snapshot.
+                        current = event_index.get(event.get("event_id"), event)
+                        if (current.get("task_id") not in (None, "", "-")
+                                and current.get("event_id") not in replaced
+                                and current.get("status") != "superseded"
+                                and "business_projects" not in current.get("content", {})):
+                            # Explicit raw assignments are handled below, even
+                            # when this document cites them as background evidence.
+                            task_projects.setdefault(current["task_id"], set()).add(name)
                 except (ValueError, TypeError, AttributeError) as error:
                     errors.append(f"项目来源格式无效：{source.relative_to(self.root)}：{type(error).__name__}")
-        replaced = {key for event in events for key in event.get("supersedes", [])}
         for event in events:
             explicit = event["content"].get("business_projects")
             if (explicit is not None and event.get("task_id") not in (None, "", "-")

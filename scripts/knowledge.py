@@ -215,13 +215,18 @@ def _sources(metadata):
 def freshness_index(root: Path, documents, events: list, config: dict) -> dict:
     """Check selected documents, sharing Git queries per repository and commit.
 
-    New event candidates share a task with source events. For source records
-    without task identity, repository membership is the available, broader hint.
-    This hint can request review but never declares the document wrong.
+    New event candidates share a task with source events or explicitly supersede
+    a source, including through a correction chain. For source records without
+    task identity, repository membership is the available, broader hint. These
+    hints can request review but never declare the document wrong.
     """
     root = root.resolve()
     checked_at = datetime.now(timezone.utc).isoformat()
     event_index = {event['event_id']: event for event in events if isinstance(event, dict) and event.get('event_id')}
+    successors = {}
+    for event in event_index.values():
+        for parent in event.get('supersedes', []):
+            successors.setdefault(parent, set()).add(event['event_id'])
     reports, pending, scopes = {}, {}, {}
     for document in documents:
         path = document['path'] if isinstance(document, dict) else document
@@ -270,12 +275,19 @@ def freshness_index(root: Path, documents, events: list, config: dict) -> dict:
                  and item['task_id'] not in ('', '-')}
         names = {source['repository'] for source in sources}
         if baseline is not None:
+            related_ids = set(report['source_event_ids'])
+            to_visit = list(related_ids)
+            while to_visit:
+                for child in successors.get(to_visit.pop(), ()):
+                    if child not in related_ids:
+                        related_ids.add(child)
+                        to_visit.append(child)
             report['newer_event_ids'] = [event['event_id'] for event in events if (
                 isinstance(event, dict) and event.get('event_id') not in report['source_event_ids']
                 and (when := _time(event.get('created_at'))) is not None and when > baseline
-                and (event.get('task_id') in tasks if tasks else any(
+                and (event.get('event_id') in related_ids or (event.get('task_id') in tasks if tasks else any(
                     isinstance(project, dict) and project.get('name') in names for project in event.get('projects', [])
-                ))
+                )))
             )]
             if report['newer_event_ids']:
                 report['diagnostics'].append('发现晚于知识核验依据的关联事件，建议复核；这不证明现有结论错误')

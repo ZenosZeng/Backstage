@@ -172,6 +172,68 @@ def test_corrected_explicit_mapping_does_not_inherit_old_target(workspace):
     assert workspace.events({"business": "alpha"})["total"] == 0
 
 
+@pytest.mark.parametrize("task_id", ["alpha-build", "shared"])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_corrected_mapping_ignores_superseded_curated_inheritance(workspace, task_id, wrapped):
+    old = record("old", task=task_id, business=["alpha"])
+    home = workspace.root / ".share/knowledge/projects/alpha.json"
+    home.write_text(json.dumps({"events": [{"event": old} if wrapped else old]}))
+    memory.append_events(workspace.root, [old,
+        record("corrected", task=task_id, business=["beta"], supersedes=["old"]),
+        record("continued", task=task_id),
+    ])
+    assert {e["event_id"] for e in workspace.events({"business": "beta"})["items"]} == {"corrected", "continued"}
+    assert workspace.events({"business": "alpha"})["total"] == 0
+    assert workspace.timeline("alpha")["projects"][0]["event_count"] == 1
+
+
+def test_obsolete_raw_status_does_not_become_current_curated_inheritance(workspace):
+    old = record("old", business=["alpha"])
+    home = workspace.root / ".share/knowledge/projects/alpha.json"
+    home.write_text(json.dumps({"events": [old]}))
+    memory.append_events(workspace.root, [old | {"status": "superseded"},
+        record("corrected", business=["beta"]), record("continued"),
+    ])
+    assert {e["event_id"] for e in workspace.events({"business": "beta"})["items"]} == {"corrected", "continued"}
+    assert workspace.timeline("alpha")["projects"][0]["event_count"] == 1
+
+
+@pytest.mark.parametrize("task_id", ["alpha-build", "shared"])
+def test_current_explicit_source_assignment_wins_over_curated_inheritance(workspace, task_id):
+    source = record("source", task=task_id, business=["beta"])
+    home = workspace.root / ".share/knowledge/projects/alpha.json"
+    home.write_text(json.dumps({"events": [source]}))
+    memory.append_events(workspace.root, [source, record("continued", task=task_id)])
+    assert {e["event_id"] for e in workspace.events({"business": "beta"})["items"]} == {"source", "continued"}
+    assert workspace.events({"business": "alpha"})["total"] == 0
+
+
+def test_explicitly_unassigned_source_does_not_create_curated_task_inheritance(workspace):
+    source = record("source", business=[])
+    home = workspace.root / ".share/knowledge/projects/alpha.json"
+    home.write_text(json.dumps({"events": [source]}))
+    memory.append_events(workspace.root, [source, record("continued")])
+    assert workspace.events({"business": "alpha"})["total"] == 0
+    assert workspace.timeline()["coverage"]["unassigned_events"] == 2
+
+
+def test_cross_project_task_context_is_complete_but_milestones_stay_scoped(workspace):
+    memory.append_events(workspace.root, [
+        record("obsolete", business=["alpha"], event_type="decision"),
+        record("decision", business=["alpha"], event_type="decision", supersedes=["obsolete"]),
+        record("result", business=["beta"], event_type="test_result"),
+        record("risk", business=["beta"], event_type="risk"),
+        record("unrelated", task="other", business=["beta"], event_type="test_result"),
+    ])
+    for name, milestone_ids in (("alpha", {"decision"}), ("beta", {"result", "risk"})):
+        response = workspace.timeline(name, "shared")
+        detail = response["task_detail"]
+        assert [e["event_id"] for e in detail["decisions"]] == ["decision"]
+        assert [e["event_id"] for e in detail["results"]] == ["result"]
+        assert [e["event_id"] for e in detail["attention"]] == ["risk"]
+        assert {e["event_id"] for e in response["projects"][0]["milestones"]} == milestone_ids
+
+
 def test_new_routes_are_read_only_and_validate_scope(workspace):
     memory.append_events(workspace.root, [record("fact", task="alpha-build")])
     before = {p.relative_to(workspace.root): p.read_bytes() for p in workspace.root.rglob("*") if p.is_file()}

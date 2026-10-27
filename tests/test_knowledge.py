@@ -157,6 +157,76 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(report['newer_event_ids'], ['related-new'])
         self.assertIn('不证明', report['diagnostics'][0])
 
+    def test_explicit_source_correction_across_tasks_and_repositories_requests_review(self):
+        self.metadata()
+        for projects in ([{'name': 'engine'}], [{'name': 'other-repository'}]):
+            with self.subTest(projects=projects):
+                self.events = [self.event, self.event | {
+                    'event_id': 'source-correction', 'created_at': '2026-10-03T00:00:00Z',
+                    'task_id': 'other-work', 'projects': projects, 'supersedes': ['source-event'],
+                }, self.event | {
+                    'event_id': 'unrelated-correction', 'created_at': '2026-10-04T00:00:00Z',
+                    'task_id': 'other-work', 'projects': projects, 'supersedes': ['unrelated-source'],
+                }]
+                report = self.check()
+                self.assertEqual(report['state'], 'needs_review')
+                self.assertEqual(report['sources'][0]['state'], 'current')
+                self.assertEqual(report['source_event_ids'], ['source-event'])
+                self.assertEqual(report['newer_event_ids'], ['source-correction'])
+
+    def test_transitive_correction_follows_sources_across_verification_boundary(self):
+        self.metadata()
+        earlier = self.event | {
+            'event_id': 'earlier-correction', 'created_at': '2026-10-01T12:00:00Z',
+            'task_id': 'other-work', 'projects': [{'name': 'other-repository'}],
+            'supersedes': ['source-event'],
+        }
+        later = earlier | {
+            'event_id': 'later-correction', 'created_at': '2026-10-03T00:00:00Z',
+            'supersedes': ['earlier-correction'],
+        }
+        self.events.extend([earlier, later])
+        report = self.check()
+        self.assertEqual(report['state'], 'needs_review')
+        self.assertEqual(report['newer_event_ids'], ['later-correction'])
+
+    def test_source_corrections_at_or_before_verification_do_not_request_review(self):
+        self.metadata()
+        self.events.extend(self.event | {
+            'event_id': f'correction-{index}', 'created_at': when,
+            'task_id': 'other-work', 'projects': [{'name': 'other-repository'}],
+            'supersedes': ['source-event'],
+        } for index, when in enumerate(('2026-10-01T12:00:00Z', '2026-10-02T00:00:00Z')))
+        report = self.check()
+        self.assertEqual(report['state'], 'current')
+        self.assertEqual(report['newer_event_ids'], [])
+
+    def test_source_correction_without_verification_time_uses_source_time(self):
+        self.metadata(verified=None)
+        self.events.append(self.event | {
+            'event_id': 'source-correction', 'created_at': '2026-10-01T12:00:00Z',
+            'task_id': 'other-work', 'supersedes': ['source-event'],
+        })
+        report = self.check()
+        self.assertEqual(report['state'], 'needs_review')
+        self.assertIsNone(report['verified_at'])
+        self.assertEqual(report['newer_event_ids'], ['source-correction'])
+
+    def test_source_correction_preserves_stale_and_unknown_source_states(self):
+        self.metadata()
+        self.events.append(self.event | {
+            'event_id': 'source-correction', 'created_at': '2026-10-03T00:00:00Z',
+            'task_id': 'other-work', 'supersedes': ['source-event'],
+        })
+        (self.repo / 'src/main.py').write_text('value = 2\n')
+        report = self.check()
+        self.assertEqual(report['state'], 'stale')
+        self.assertEqual(report['newer_event_ids'], ['source-correction'])
+        self.config['projects']['engine']['path'] = 'absent'
+        report = self.check()
+        self.assertEqual(report['state'], 'unknown')
+        self.assertEqual(report['newer_event_ids'], ['source-correction'])
+
     def test_unknown_commit_and_unavailable_or_unregistered_repositories_are_unknown(self):
         for source in (
             {'repository': 'engine', 'commit': 'f' * 40, 'covers': ['src/**']},
