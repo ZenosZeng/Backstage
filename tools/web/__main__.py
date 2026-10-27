@@ -82,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = workspace.services()
             elif url.path == "/api/monitor":
                 data = workspace.monitor(query["kind"])
+            elif url.path == "/api/monitors":
+                data = workspace.monitors()
             elif url.path == "/api/cluster":
                 data = workspace.cluster()
             elif url.path == "/api/asset":

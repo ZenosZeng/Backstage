@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -23,11 +24,29 @@ from scripts.doctor import code_identity
 
 
 SERVICE_COMMANDS = {
-    "watchdog-b1k": ("tools.watchdog", "b1k"),
-    "watchdog-train": ("tools.watchdog", "train"),
+    "interaction": ("tools.watchdog.interaction", "watch"),
     "claude-feishu": ("tools.claude_feishu",),
     "cluster-monitor": ("tools.cluster",),
 }
+def service_commands(name: str) -> tuple[str, ...] | None:
+    if name in SERVICE_COMMANDS:
+        return SERVICE_COMMANDS[name]
+    match = re.fullmatch(r"watchdog-([a-z][a-z0-9_]*)", name)
+    return ("tools.watchdog", match[1]) if match else None
+
+
+def service_names(root: Path | None = None) -> tuple[str, ...]:
+    from tools.watchdog.loader import available_adapters
+
+    root = root if root is not None else local_root()
+    names = set(SERVICE_COMMANDS)
+    names.update(f"watchdog-{name}" for name in available_adapters())
+    names.update(path.stem for path in (root / "config").glob("watchdog-*.json"))
+    names.update(path.parent.name for path in (root / "tools").glob("watchdog-*/pid.json"))
+    return tuple(sorted(name for name in names if service_commands(name)))
+
+
+# Fixed built-in services; discover user monitors through service_names().
 SERVICES = tuple(SERVICE_COMMANDS)
 CODE_AT_START = code_identity(ROOT)
 
@@ -59,9 +78,10 @@ def running_record(directory: Path, name: str) -> dict | None:
         if process_start(pid) != record["start_ticks"]:
             return None
         command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        if name not in SERVICE_COMMANDS:
+        parts = service_commands(name)
+        if parts is None:
             return None
-        expected = [b"-m", *(part.encode() for part in SERVICE_COMMANDS[name])]
+        expected = [b"-m", *(part.encode() for part in parts)]
         if not any(
             command[i : i + len(expected)] == expected for i in range(len(command))
         ):
@@ -228,15 +248,12 @@ def main(
             config["notify"] = False
         # Environment-selected requests must not silently reuse a different monitor.
         startup_environment = dict(os.environ)
+        extra_keys = getattr(factory, "environment_keys", lambda config: ())(config)
+        if not isinstance(extra_keys, (list, tuple)) or any(not isinstance(key, str) for key in extra_keys):
+            raise ValueError("adapter environment_keys must be a list or tuple of names")
         environment = {
             key: os.environ.get(key)
-            for key in (
-                "B1K_EVAL_LOG",
-                "B1K_EVAL_CONFIG",
-                "B1K_WATCHDOG_ERROR_PATTERNS",
-                "CLAUDE_CLI",
-                "CLAUDE_FEISHU_WORKDIR",
-            )
+            for key in ("CLAUDE_CLI", "CLAUDE_FEISHU_WORKDIR", *extra_keys)
         }
         fingerprint = hashlib.sha256(
             json.dumps([config, str(config_path), environment], sort_keys=True).encode()
@@ -372,5 +389,5 @@ if __name__ == "__main__":
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--all-status", action="store_true", required=True)
     cli.parse_args()
-    for service_name in SERVICES:
+    for service_name in service_names():
         status(service_name, local_root() / "tools" / service_name)

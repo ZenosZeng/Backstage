@@ -15,7 +15,7 @@ import unittest
 import pytest
 
 from tools.watchdog import runner
-from tools.watchdog.b1k import B1kEvalMonitor
+
 
 
 class _Alert:
@@ -75,8 +75,6 @@ def _run(alerts: list, polls: int = 4) -> list[str]:
 
 @pytest.mark.parametrize("raise_error", [False, True])
 def test_failed_edge_is_retried_even_without_another_transition(tmp_path, raise_error):
-    log = tmp_path / "eval.log"
-    log.write_text("Heartbeat: completed=1/10, failures=0\n")
     poll = 0
     attempts = []
     delivered = []
@@ -100,10 +98,20 @@ def test_failed_edge_is_retried_even_without_another_transition(tmp_path, raise_
                 delivered.append(title)
             return True
 
-    monitor = B1kEvalMonitor(log, process_checker=lambda: poll == 0)
+    class Monitor:
+        name = "edge fixture"
+        alert_interval = 600
+
+        def check_alerts(self):
+            return [_Alert("process exited", lifecycle=True)] if poll == 1 else []
+
+        def active(self):
+            return False
+
+    monitor = Monitor()
     runner.run(monitor, Notifier(), Stop(), poll_seconds=0)
-    assert attempts == ["评测进程异常退出", "评测进程异常退出"]
-    assert delivered == ["评测进程异常退出"]
+    assert attempts == ["process exited", "process exited"]
+    assert delivered == ["process exited"]
 
 
 def test_recovered_stall_does_not_deliver_a_stale_pending_alert():
