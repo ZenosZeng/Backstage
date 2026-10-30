@@ -6,7 +6,12 @@
 
 为 Codex、Claude Code 和 Kimi 提供跨仓库记忆、只读工作台、任务监控与飞书遥控。
 
-[![tests](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml/badge.svg)](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![version](https://img.shields.io/github/v/tag/ZenosZeng/Backstage)](https://github.com/ZenosZeng/Backstage/tags) [![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/ZenosZeng/badge.svg)](https://hub.xerj.org/contributors/ZenosZeng)
+[![tests](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml/badge.svg)](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![version](https://img.shields.io/github/v/tag/ZenosZeng/Backstage)](https://github.com/ZenosZeng/Backstage/tags)
+[![GitHub Pages](https://img.shields.io/badge/GitHub_Pages-Website-2676D9?logo=github)](https://zenoszeng.github.io/Backstage/)
+[![Demo](https://img.shields.io/badge/Demo-Try_it-7C6FCB.svg)](https://zenoszeng.github.io/Backstage/demo/)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/ZenosZeng/badge.svg)](https://hub.xerj.org/contributors/ZenosZeng)
 
 - **共享记忆**：记录事实、决策与来源，用稳定 task ID 串联跨仓库工作。
 - **多机协作**：按需通过私有 S3 同步知识、Skill 和记忆，也可只在本地使用。
@@ -29,8 +34,8 @@
 
 ## 官网与演示
 
-预期 GitHub Pages 入口：[官网](https://zenoszeng.github.io/Backstage/) · [交互 Demo](https://zenoszeng.github.io/Backstage/demo/)。
-入口在 Pages 部署完成后可用；本分支新增网站文件不代表已发布。无需初始化工作区即可在本地预览：
+GitHub Pages 入口：[官网](https://zenoszeng.github.io/Backstage/) · [交互 Demo](https://zenoszeng.github.io/Backstage/demo/)。
+无需初始化工作区即可访问，也可以在本地预览：
 
 ```bash
 python3 scripts/build_site.py --output .local/site-preview

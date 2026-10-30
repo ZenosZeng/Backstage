@@ -7,12 +7,12 @@
 
 ## 访问与本地预览
 
-预期 GitHub Pages 入口：
+GitHub Pages 入口：
 
 - 官网：<https://zenoszeng.github.io/Backstage/>
 - Demo：<https://zenoszeng.github.io/Backstage/demo/>
 
-这些是站点的部署目标，新增源码或合并 PR 不代表站点已发布。未发布时可在仓库根目录预览：
+官网和 Demo 已上线，也可在仓库根目录预览：
 
 ```bash
 python3 scripts/build_site.py --output .local/site-preview
@@ -44,5 +44,5 @@ Demo 复用 `tools/web/static/` 中的工作台界面，以静态合成响应提
 然后在 Actions → website 中选择 `main`，手动运行 Run workflow。
 PR 和 push 只检查静态构建；只有在 `main` 手动运行时才上传站点并部署。
 流程依据见 [GitHub Pages 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)。
-本次实现不自动修改仓库设置、创建发布或推送代码，也不部署和重启本机工具服务。
+站点发布不更新或重启本机工具服务；修改源码或合并 PR 后，仍需手动运行发布工作流才能更新官网。
 脱敏覆盖当前公开文件，保留作者与版权信息，不重写 Git 历史或修改私有工作区数据。
