@@ -1,4 +1,5 @@
 // This view only reads the collector's saved snapshot. It never starts collection.
+import {api} from './api.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const numeric = value => typeof value === 'number' && Number.isFinite(value);
 const fixed = (value, digits=1) => numeric(value) ? value.toFixed(digits) : '—';
@@ -168,9 +169,7 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
     pending=true;controller=new AbortController();renderStatus();
     const timeout=setTimeout(()=>controller?.abort(),10000);
     try {
-      const response=await fetch('api/cluster',{cache:'no-store',signal:controller.signal});
-      const next=await response.json();
-      if(!response.ok) throw new Error(next.error || '集群快照读取失败');
+      const next=await api('cluster',{}, {signal:controller.signal});
       if(!current() || epoch!==request) return;
       data=next;failed=false;render();onRead(next);
     } catch(error) {

@@ -1,0 +1,57 @@
+name: website
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "tools/web/static/**"
+      - "scripts/build_site.py"
+      - "tests/test_site.py"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "tools/web/static/**"
+      - "scripts/build_site.py"
+      - "tests/test_site.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 -m unittest tests.test_site -v
+      - run: python3 scripts/build_site.py --output _site
+      - uses: actions/upload-pages-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -5,6 +5,7 @@ Linux 生产环境，本补丁只在 Windows 机器上按需应用，避免影�
 
 - 补丁文件：`windows-portability.patch`，对应 **v0.6.1** 级别的修复内容（小版本，只修 bug）
 - 当前应用上下文：**v0.7.0**；沿用 v0.6.1 修复，并补充新版 doctor 的文件副本识别，仍只保留在补丁文件中。
+- v0.13.0 同步了通用测试样例名称；Linux 上的 `git apply --check` 通过，未新增 Windows 实机验收。
 
 ## 使用方法
 

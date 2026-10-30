@@ -416,7 +416,7 @@ diff --git a/tests/test_sync.py b/tests/test_sync.py
 @@ -979,8 +988,15 @@
          self.assertTrue(conflict.is_dir() and not conflict.is_symlink())
          for agent_home in (".claude", ".kimi-code"):
-             link = home / agent_home / "skills" / "check-goai-eval-status"
+             link = home / agent_home / "skills" / "check-eval-status"
 -            self.assertTrue(link.is_symlink())
 -        self.assertTrue((workspace / "AGENTS.md").is_symlink())
 +            if os.name == "nt":

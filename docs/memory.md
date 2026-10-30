@@ -23,12 +23,15 @@
 | `agent/prompts/` | `AGENTS.md` / `CLAUDE.md`——各 Agent 的入口 Prompt |
 | `agent/skills/` | Skill 库（`common/ eval/ inference/ memory/ train/`） |
 | `knowledge/` | 策展长期知识：`_workspace.md`、`projects/`、`timeline/` |
-| `docs/` | 项目工作文档：`b1k/`、`goai/` |
+| `docs/` | 项目工作文档：`<project>/` |
 | `setup/` | 机器部署手册 `onboarding/` 与工作目录速查 |
 
 原始事件按机器和 Agent 分区，每台机器只上传自己的前缀。共享状态采用完整目录同步，并使用本地基线检测本地与 S3 是否发生分叉。
 
 **2026-09-11 结构重排**（`SHARED_DIRS` 随之更新，远端目录名同步变更）：
+
+下表展示历史目录布局；`<project>` 是项目目录的占位符，不是工具接受的通配符迁移规则。
+具体项目子目录须根据自己的现有数据核对并手工整理，工具不会按这些示意名称自动迁移。
 
 | 旧 | 新 |
 |---|---|
@@ -36,9 +39,9 @@
 | `skills/` | `agent/skills/` |
 | `long-term/` | `knowledge/` |
 | `shared_files/` | `docs/` |
-| `shared_files/b1k-docs/` | `docs/b1k/` |
-| `shared_files/goai-docs-sim/` | `docs/goai/` |
-| `shared_files/goai-docs-real/data_audit_20260826/` | `docs/goai/data-audit-20260826/` |
+| `shared_files/<project>-docs/` | `docs/<project>/` |
+| `shared_files/<project>-docs-sim/` | `docs/<project>/sim/` |
+| `shared_files/<project>-docs-real/data_audit_20260826/` | `docs/<project>/data-audit-20260826/` |
 | `shared_files/onboarding/` | `setup/onboarding/` |
 
 旧远端前缀不再同步；其他机器 pull 后本地残留的旧目录可手动清理。`memory/` 中的历史事件

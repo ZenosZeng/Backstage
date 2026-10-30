@@ -1,4 +1,5 @@
 import {mountCluster} from './cluster.js';
+import {api} from './api.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -39,12 +40,6 @@ let overview, renderEpoch = 0, eventEpoch = 0, toolEpoch = 0, runtimeCleanup = (
 const content = $('#content');
 function route() { const [name, query] = location.hash.replace(/^#\/?/, '').split('?'); const params=new URLSearchParams(query); if(name==='memory' && params.get('business')) params.set('name',params.get('business')); return {name:labels[name] ? name : 'projects', params}; }
 function href(name, params = {}) { return `#/${name}?${new URLSearchParams(Object.entries(params).filter(([,v])=>v !== '' && v != null))}`; }
-async function api(path, params = {}) {
-  const response = await fetch(`api/${path}?${new URLSearchParams(params)}`, {cache:'no-store'});
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '读取失败');
-  return data;
-}
 function empty(message) { return `<div class="empty">${icon('search')}<strong>${escape(message)}</strong><p>试试调整筛选条件，或刷新工作区数据。</p></div>`; }
 function heading(kicker, title, description, action = '') { return `<div class="page-heading journey-heading"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p>${description}</p></div>${action}</div>`; }
 function tag(text, color = '') { return `<span class="tag ${color}">${escape(text)}</span>`; }

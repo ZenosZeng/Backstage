@@ -6,6 +6,8 @@
 
 为 Codex、Claude Code 和 Kimi 提供跨仓库记忆、只读工作台、任务监控与飞书遥控。
 
+[![tests](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml/badge.svg)](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![version](https://img.shields.io/github/v/tag/ZenosZeng/Backstage)](https://github.com/ZenosZeng/Backstage/tags) [![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/ZenosZeng/badge.svg)](https://hub.xerj.org/contributors/ZenosZeng)
+
 - **共享记忆**：记录事实、决策与来源，用稳定 task ID 串联跨仓库工作。
 - **多机协作**：按需通过私有 S3 同步知识、Skill 和记忆，也可只在本地使用。
 - **只读工作台**：按项目时间线回顾任务历程、关键节点和文档，查看集群采集快照与本机运行状态。
@@ -13,21 +15,30 @@
 
 ## 当前版本
 
-最新版本：**v0.12.0** · 当前功能版本：**v0.12.0**。
+最新版本：**v0.13.0** · 当前功能版本：**v0.13.0**。
 
-**v0.12.0 主要功能**
+**v0.13.0 主要功能**
 
-- 通用 watchdog 提供轮询、通知、服务管理与本机 adapter 加载；业务实现及对应测试保存在 Git 忽略目录。
-- 统一 `watchdog <实例名>` 入口，支持独立配置、游标和状态；只读工作台动态发现 adapter 与配置实例。
-- 本机交互文档记录待决策问题，满两分钟未回答时发飞书卡片，此后每两分钟提醒，回答或取消后停止。
-- 飞书原生命令支持查询、回答和取消问题；Agent 忙碌时仍可回写，通知投递与用户决策分别记录。
+- 新增静态官网，介绍共享记忆、项目时间线、多机协作、监控与飞书遥控，并提供快速开始入口。
+- 提供带 `DEMO DATA` 标识的交互演示，使用合成项目展示时间线、任务和文档，复用现有工作台界面。
+- 公开文档、模板与示例采用通用概念；官网构建只读取公开站点内容与工作台静态资源，不读取真实工作区。
 
-保留跨仓库记忆、项目时间线、任务与会话关联、知识核验、集群资源快照和飞书遥控。
+保留跨仓库记忆、任务与会话关联、知识核验、集群资源快照、通用 watchdog 和无人值守问答提醒。
 所有 watchdog 集中在常驻 Coder workspace；私有 adapter、配置和交互文档不随公共 Git 发布。
-原项目专用 Pixi 任务改为 `pixi run watchdog <实例名>`，详见 [版本记录](docs/changelog.md)。
+从 Git 克隆后须先在本机接入自己的监控实现，详见 [版本记录](docs/changelog.md)。
 
-版本声明不代表已部署，已有服务须在明确部署时重载；公共仓库不包含私有 adapter，
-从 Git 克隆后须先在本机接入自己的监控实现。
+## 官网与演示
+
+预期 GitHub Pages 入口：[官网](https://zenoszeng.github.io/Backstage/) · [交互 Demo](https://zenoszeng.github.io/Backstage/demo/)。
+入口在 Pages 部署完成后可用；本分支新增网站文件不代表已发布。无需初始化工作区即可在本地预览：
+
+```bash
+python3 scripts/build_site.py --output .local/site-preview
+python3 -m http.server 8791 --bind 127.0.0.1 --directory .local/site-preview
+```
+
+打开 `http://127.0.0.1:8791/` 查看官网，或 `/demo/` 体验合成项目。Demo 不连接真实工作区、SSH、飞书或 Agent，
+不包含真实记忆、运行日志或配置；它与 `8787` 端口的本机工作台独立。构建与发布边界见 [网站说明](docs/website.md)。
 
 ## 快速开始
 
@@ -139,7 +150,7 @@ pixi run -e dev lint
 
 ## 文档
 
-[记忆与同步](docs/memory.md) · [工具参考](tools/README.md) · [工作台](tools/web/README.md) · [版本记录](docs/changelog.md)
+[记忆与同步](docs/memory.md) · [工具参考](tools/README.md) · [工作台](tools/web/README.md) · [官网与 Demo](docs/website.md) · [版本记录](docs/changelog.md)
 
 ## 许可
 

@@ -82,8 +82,8 @@ class SyncTest(unittest.TestCase):
 
     def write_eval_docs(self, base: Path, request: str, report: str) -> None:
         files = {
-            ".share/docs/b1k/eval_request.yaml": request,
-            ".share/docs/b1k/eval_report.md": report,
+            ".share/docs/example-app/eval_request.yaml": request,
+            ".share/docs/example-app/eval_report.md": report,
         }
         for relative, content in files.items():
             path = base / relative
@@ -618,7 +618,7 @@ class SyncTest(unittest.TestCase):
         self.write_shared(self.root, "base")
         self.write_eval_docs(self.root, "request base\n", "report base\n")
         SYNC.update_shared_base(self.root, self.root)
-        (self.root / ".share/docs/b1k/eval_report.md").write_text(
+        (self.root / ".share/docs/example-app/eval_report.md").write_text(
             "report local\n", encoding="utf-8"
         )
         remote = Path(self.temporary.name) / "remote-file-publish"
@@ -632,18 +632,18 @@ class SyncTest(unittest.TestCase):
             SYNC.publish_shared_file(
                 self.root,
                 self.config,
-                Path("docs/b1k/eval_report.md"),
+                Path("docs/example-app/eval_report.md"),
                 dry_run=False,
                 allow_non_writer=False,
             )
 
         copy.assert_called_once()
         self.assertEqual(
-            (self.root / ".share/docs/b1k/eval_request.yaml").read_text(),
+            (self.root / ".share/docs/example-app/eval_request.yaml").read_text(),
             "request remote\n",
         )
         self.assertEqual(
-            (self.root / ".share/docs/b1k/eval_report.md").read_text(),
+            (self.root / ".share/docs/example-app/eval_report.md").read_text(),
             "report local\n",
         )
 
@@ -651,7 +651,7 @@ class SyncTest(unittest.TestCase):
         self.write_shared(self.root, "base")
         self.write_eval_docs(self.root, "request base\n", "report base\n")
         SYNC.update_shared_base(self.root, self.root)
-        (self.root / ".share/docs/b1k/eval_report.md").write_text(
+        (self.root / ".share/docs/example-app/eval_report.md").write_text(
             "report local\n", encoding="utf-8"
         )
         remote = Path(self.temporary.name) / "remote-file-conflict"
@@ -665,7 +665,7 @@ class SyncTest(unittest.TestCase):
             SYNC.publish_shared_file(
                 self.root,
                 self.config,
-                Path("docs/b1k/eval_report.md"),
+                Path("docs/example-app/eval_report.md"),
                 dry_run=False,
                 allow_non_writer=False,
             )
@@ -896,9 +896,9 @@ class SyncTest(unittest.TestCase):
         # 2026-08-12：skills 分类布局（common/eval/memory/train），递归发现
         for category, names in (
             ("common", ("call-agent",)),
-            ("eval", ("analyze-b1k-eval", "sync-b1k-eval-request")),
+            ("eval", ("analyze-eval", "sync-eval-request")),
             ("memory", ("check-memory", "memory", "write-work-report")),
-            ("train", ("upload-pi-checkpoint",)),
+            ("train", ("upload-checkpoint",)),
         ):
             for name in names:
                 skill = self.root / ".share" / "agent" / "skills" / category / name
@@ -916,12 +916,12 @@ class SyncTest(unittest.TestCase):
 
         expected = {
             "call-agent": "common/call-agent",
-            "analyze-b1k-eval": "eval/analyze-b1k-eval",
-            "sync-b1k-eval-request": "eval/sync-b1k-eval-request",
+            "analyze-eval": "eval/analyze-eval",
+            "sync-eval-request": "eval/sync-eval-request",
             "check-memory": "memory/check-memory",
             "memory": "memory/memory",
             "write-work-report": "memory/write-work-report",
-            "upload-pi-checkpoint": "train/upload-pi-checkpoint",
+            "upload-checkpoint": "train/upload-checkpoint",
         }
         for agent_home in (".codex", ".claude", ".kimi-code"):
             for name, relative in expected.items():
@@ -963,14 +963,14 @@ class SyncTest(unittest.TestCase):
         home = Path(self.temporary.name) / "home"
         workspace = Path(self.temporary.name) / "workspace"
         self.config["workspace_root"] = str(workspace)
-        skill = self.root / ".share" / "agent" / "skills" / "eval" / "check-goai-eval-status"
+        skill = self.root / ".share" / "agent" / "skills" / "eval" / "check-eval-status"
         skill.mkdir(parents=True, exist_ok=True)
-        (skill / "SKILL.md").write_text("# check-goai-eval-status\n", encoding="utf-8")
+        (skill / "SKILL.md").write_text("# check-eval-status\n", encoding="utf-8")
         prompts = self.root / ".share" / "agent" / "prompts"
         prompts.mkdir(parents=True, exist_ok=True)
         (prompts / "AGENTS.md").write_text("agents\n", encoding="utf-8")
         (prompts / "CLAUDE.md").write_text("claude\n", encoding="utf-8")
-        conflict = home / ".codex" / "skills" / "check-goai-eval-status"
+        conflict = home / ".codex" / "skills" / "check-eval-status"
         conflict.mkdir(parents=True)
 
         with mock.patch.object(SYNC.Path, "home", return_value=home):
@@ -978,7 +978,7 @@ class SyncTest(unittest.TestCase):
 
         self.assertTrue(conflict.is_dir() and not conflict.is_symlink())
         for agent_home in (".claude", ".kimi-code"):
-            link = home / agent_home / "skills" / "check-goai-eval-status"
+            link = home / agent_home / "skills" / "check-eval-status"
             self.assertTrue(link.is_symlink())
         self.assertTrue((workspace / "AGENTS.md").is_symlink())
 

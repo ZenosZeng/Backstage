@@ -1,5 +1,9 @@
 # Backstage 只读工作台
 
+无需初始化工作区即可先查看[静态交互 Demo 的预期 Pages 入口](https://zenoszeng.github.io/Backstage/demo/)；
+入口须在 Pages 部署后可用，也可按[网站说明](../../docs/website.md)在本地预览。Demo 使用合成数据，
+与下面读取真实工作区的本机服务独立。
+
 在已有工作区中启动：
 
 ```bash
