@@ -115,9 +115,8 @@ pixi run claude-feishu --stop
 每个服务独立写 `.local/tools/<服务名>/service.log`、`pid.json`、锁和游标。
 遥控的 `seen.json` / `sessions.json` 只保留去重 ID 和原生会话映射，不共享聊天原文。
 旧遥控服务的会话映射/防重放文件只能在旧服务停止后迁移，不同时运行两个消费者。
-2026-09-07 评测机已完成切换：旧独立仓库归档至
-`.local/migrations/claude-feishu-20260907/`（含 `.git`），不再作为运行依赖。
-原状态文件保留作备份，当前服务只写 `.local/tools/claude-feishu/`。
+迁移独立 bridge 时，先备份原状态文件并归档旧仓库（保留 Git 历史），核对新服务已加载会话映射后，
+再移除旧运行入口。归档位置由本机选择，不上传公共仓库；新服务只写 `.local/tools/claude-feishu/`。
 `service.log` 的 `Feishu websocket connected` 表示 SDK 已完成连接，不打印带签名的连接 URL。
 
 核心代码、模板与 Pixi lock 走 Git；凭据、日志、PID、游标仅本机；Memory/Skill/项目资料沿用 S3。

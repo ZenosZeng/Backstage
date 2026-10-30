@@ -92,7 +92,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise PermissionError("请使用文档预览入口")
                 self.respond(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream", svg=path.suffix.lower() == ".svg")
                 return
-            elif url.path in {"/", "/index.html", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css"}:
+            elif url.path in {"/", "/index.html", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css", "/api.js"}:
                 path = STATIC / (url.path.lstrip("/") or "index.html")
                 self.respond(200, path.read_bytes(), (mimetypes.guess_type(path.name)[0] or "text/plain") + "; charset=utf-8")
                 return

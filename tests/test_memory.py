@@ -481,15 +481,15 @@ class MemoryCliTest(unittest.TestCase):
 
     def test_search_relevance_beats_new_incidental_mention_and_can_restore_recent(self):
         self.import_events([
-            self.sample_event("relevant", title="B1K 当前结果"),
-            self.sample_event("incidental", title="GOAI 路演", created_at="2026-08-05T00:00:00Z",
-                              content={"what": "顺带提到B1K"}),
+            self.sample_event("relevant", title="ALPHA 当前结果"),
+            self.sample_event("incidental", title="BETA 路演", created_at="2026-08-05T00:00:00Z",
+                              content={"what": "顺带提到ALPHA"}),
         ])
-        ranked = json.loads(self.run_cli("search", "b1k", "--json").stdout)
+        ranked = json.loads(self.run_cli("search", "alpha", "--json").stdout)
         self.assertEqual([e["event_id"] for e in ranked], ["relevant", "incidental"])
-        recent = json.loads(self.run_cli("search", "b1k", "--sort", "recent", "--json").stdout)
+        recent = json.loads(self.run_cli("search", "alpha", "--sort", "recent", "--json").stdout)
         self.assertEqual(recent[0]["event_id"], "incidental")
-        self.assertFalse(json.loads(self.run_cli("search", "b1k missing", "--json").stdout))
+        self.assertFalse(json.loads(self.run_cli("search", "alpha missing", "--json").stdout))
 
     def test_search_short_output_full_escape_and_json_compatibility(self):
         body = "中文内容" * 200 + "完整结尾"

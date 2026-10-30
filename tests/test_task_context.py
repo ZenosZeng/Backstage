@@ -44,7 +44,7 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual(task_context.execution_status([active], "delivery", now=NOW)["state"], "unknown")
 
     def test_optional_metadata_validation_and_roundtrip(self):
-        value = event("metadata", content={"business_projects": ["vla-bridge", "b1k"],
+        value = event("metadata", content={"business_projects": ["project-alpha", "project-beta"],
                                            "session_refs": [identity(worktree="/repo/worktree")],
                                            "agent_runtime": identity() | {
                                                "state": "waiting", "observed_at": "2026-10-27T19:59:00+08:00"}})
@@ -59,8 +59,8 @@ class TaskContextTests(unittest.TestCase):
 
     def test_new_metadata_rejects_invalid_fields_before_any_writes(self):
         invalid = [
-            {"business_projects": "b1k"}, {"business_projects": ["../b1k"]},
-            {"business_projects": ["B1K"]}, {"business_projects": [1]},
+            {"business_projects": "project-beta"}, {"business_projects": ["../project-beta"]},
+            {"business_projects": ["PROJECT-BETA"]}, {"business_projects": [1]},
             {"session_refs": {}}, {"session_refs": [None]},
             {"session_refs": [identity(agent="unknown")]},
             {"session_refs": [identity(machine="bad/machine")]},
@@ -172,17 +172,17 @@ class TaskContextCliTests(unittest.TestCase):
                         "--title", "continuity", "--what", "verified metadata", *args)
 
     def test_cli_metadata_defaults_cross_machine_references_and_prepared_handoff(self):
-        added = self.add("--task", "delivery", "--business-project", "vla-bridge", "--business-project", "vla-bridge",
+        added = self.add("--task", "delivery", "--business-project", "project-alpha", "--business-project", "project-alpha",
                          "--session-id", "native-thread", "--runtime-state", "waiting", "--where", "process observation")
         self.assertEqual(added.returncode, 0, added.stderr)
         stored, errors = memory.load_events(self.root)
         self.assertFalse(errors)
         content = stored[0]["content"]
-        self.assertEqual(content["business_projects"], ["vla-bridge"])
+        self.assertEqual(content["business_projects"], ["project-alpha"])
         self.assertEqual(content["session_refs"], [identity(session="native-thread", machine="writer")])
         self.assertEqual(content["agent_runtime"]["observed_at"], stored[0]["created_at"])
         remote = self.add("--task", "delivery", "--session-id", "remote-thread", "--session-agent", "claude",
-                          "--session-machine", "4090maozan", "--session-repository", "repo-a", "--session-worktree", "/repo/wt")
+                          "--session-machine", "remote-node", "--session-repository", "repo-a", "--session-worktree", "/repo/wt")
         self.assertEqual(remote.returncode, 0, remote.stderr)
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         result = self.cli("handoff", "--task", "delivery", "--to-agent", "kimi", "--json")
@@ -192,7 +192,7 @@ class TaskContextCliTests(unittest.TestCase):
         self.assertEqual(len(handoff["sessions"]), 2)
         self.assertEqual(handoff["execution"]["state"], "waiting")
         text = self.cli("handoff", "--task", "delivery", "--to-agent", "kimi")
-        for expected in ("尚未派发", "kimi", "4090maozan/claude/remote-thread", "writer/codex/native-thread", "waiting", "process observation"):
+        for expected in ("尚未派发", "kimi", "remote-node/claude/remote-thread", "writer/codex/native-thread", "waiting", "process observation"):
             self.assertIn(expected, text.stdout)
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
 

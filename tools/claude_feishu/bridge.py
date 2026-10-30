@@ -668,7 +668,7 @@ def _cmd_cost(data: P2ImMessageReceiveV1, chat_id: str) -> None:
 
 def _cmd_cd(data: P2ImMessageReceiveV1, chat_id: str, arg: str) -> None:
     if not arg:
-        _send_reply(data, "用法：`/cd <目录>`（例：/cd ~/code/BEHAVIOR-1K）")
+        _send_reply(data, "用法：`/cd <目录>`（例：/cd ~/code/example-app）")
         return
     target = pathlib.Path(os.path.expanduser(arg))
     if not target.is_dir():

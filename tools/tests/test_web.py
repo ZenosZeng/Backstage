@@ -124,7 +124,7 @@ def test_svg_is_sandboxed_and_static_assets_are_served(server):
     with urlopen(server + "/api/asset?path=.share/knowledge/chart.svg") as response:
         assert "sandbox" in response.headers["Content-Security-Policy"]
         assert response.headers["Content-Type"] == "image/svg+xml"
-    for path in ("/", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css"):
+    for path in ("/", "/app.js", "/app.css", "/theme.js", "/cluster.js", "/cluster.css", "/api.js"):
         with urlopen(server + path) as response:
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
