@@ -177,7 +177,7 @@ async function showProjects(params, epoch) {
     content.innerHTML=heading('PROJECT JOURNEYS','把项目，放回时间里。','从最早记录到最近进展，沿着时间看每个项目如何走到今天。')+
       `<div class="journey-metrics"><div class="journey-metric"><small>${data.project_mode==='knowledge'?'业务项目':'来源仓库'}</small><strong>${data.projects.length}</strong></div><div class="journey-metric"><small>进行中任务</small><strong>${totals.active || 0}</strong></div><div class="journey-metric"><small>已关闭任务</small><strong>${totals.closed || 0}</strong></div><div class="journey-metric"><small>记录覆盖</small><strong class="journey-date-range">${dateLabel(data.range?.start)}<span>— ${dateLabel(data.range?.end)}</span></strong></div></div>`+
       `<div class="journey-stat-scope">当前全部项目口径 · 按任务 ID 去重 · 未声明 ${totals.unknown || 0} · 暂停 ${totals.paused || 0} · 冲突 ${totals.conflict || 0}<br>已关联 ${number(data.coverage.associated_events)} / ${number(data.coverage.total_events)} 条记录；未归属 ${number(data.coverage.unassigned_events)} 条记录、${number(data.coverage.unassigned_tasks)} 项任务。记录日期表示证据覆盖范围。</div>`+
-      attentionPanel(data)+
+      (data.attention_count?`<details class="journey-attention-disclosure"><summary>需要关注 · ${data.attention_count} 项任务</summary>${attentionPanel(data)}</details>`:'')+
       (data.coverage.unassigned_task_items.length?`<details class="unassigned-tasks"><summary>查看未归属任务（前 ${data.coverage.unassigned_task_items.length} 项）</summary>${data.coverage.unassigned_task_items.map(t=>`<div><code>${escape(t.task_id)}</code>${taskTag(t.state)}</div>`).join('')}<p>由 Agent 记录明确业务项目归属后，相关任务会进入项目时间线。</p></details>`:'')+
       `<div class="journey-toolbar"><form class="journey-search" id="project-search">${icon('search')}<input aria-label="筛选项目" name="q" placeholder="找到一个项目…" value="${escape(query)}"><select name="state" aria-label="按关联任务状态筛选"><option value="">全部项目</option>${Object.entries(states).map(([key,label])=>`<option value="${key}" ${state===key?'selected':''}>含${escape(label)}任务</option>`).join('')}</select><button class="button" type="submit">筛选</button></form>${scaleControls(mode,params)}</div>`+
       (projects.length?gantt(projects,data.range,mode):empty('没有匹配的项目'))+
@@ -206,7 +206,12 @@ async function showDocuments(params, epoch) {
   const business=params.get('business');
   const project=overview.projects.find(p=>p.name===business && p.kind==='knowledge');
   if (!business && !params.get('path') && !params.get('q') && !params.has('all') && overview.project_mode==='knowledge') {
-    content.innerHTML=heading('KNOWLEDGE LIBRARY','从项目开始阅读。','先选择业务项目，再打开它的知识、实验报告与架构图。',`<a class="button" href="${href('documents',{all:'true'})}">全部文档 →</a>`) + `<div class="projects-grid document-projects">${overview.projects.map((p,i)=>`<a class="project-card" href="${href('documents',{business:p.name})}"><div class="project-card-head"><span class="project-avatar tone-${i%4}">${icon('documents')}</span>${icon('arrow')}</div><h3>${escape(p.title)}</h3><p>${escape(p.description)}</p><div class="project-card-foot"><span>项目知识 · 报告 · 架构图</span><span>${p.documents.length} 份文档</span></div></a>`).join('')}</div>`;
+    const cards=overview.projects.map(p=>{
+      const tasks=overview.tasks.filter(t=>(t.business_projects || []).includes(p.name));
+      const counts=Object.keys(states).map(state=>[state,tasks.filter(t=>t.state===state).length]).filter(([,count])=>count);
+      return `<article class="project-card document-project-card"><div class="document-project-head"><h3><a href="${href('documents',{business:p.name})}">${escape(p.title)}</a></h3><div class="document-project-status"><span>当前任务状态</span>${counts.map(([state,count])=>tag(`${states[state]} ${count}`,state==='active'?'green':state==='conflict'?'amber':'')).join('') || tag('尚无关联任务')}</div><a class="button" href="${href('documents',{business:p.name})}">阅读文档 · ${p.documents.length} →</a></div><dl class="document-project-details"><div><dt>项目摘要</dt><dd>${escape(p.description || '尚未记录项目摘要')}</dd></div><div><dt>最近进展</dt><dd>${escape(p.latest_title || '尚无关联进展记录')}${p.last_event_at?`<small>最近记录 · ${when(p.last_event_at)}</small>`:''}</dd></div></dl><a class="document-project-timeline" href="${href('projects',{name:p.name})}">查看任务与历程 →</a></article>`;
+    }).join('');
+    content.innerHTML=heading('KNOWLEDGE LIBRARY','项目文档','按项目查看摘要、最近记录与任务状态，再进入文档阅读。',`<a class="button" href="${href('documents',{all:'true'})}">全部文档 →</a>`) + `<div class="projects-grid document-projects">${cards}</div>`;
     return;
   }
   const data = await api('documents',{...(business ? {business} : {}),q:params.get('q') || ''});
@@ -234,7 +239,7 @@ function doctorDetails(data) {
 async function showRuntime(params, epoch) {
   const tab=['cluster','train','services'].includes(params.get('tab'))?params.get('tab'):'cluster';
   const titles={cluster:['CLUSTER RESOURCES','集群资源。','每台机器、每张 GPU，以及已配置入口的采集快照。'],train:['TRAINING & EVALUATION','训练与评测。','读取已配置监控的本机快照，按需手动刷新。'],services:['LOCAL SERVICES','本机服务。','核对服务进程、启动版本与工作区健康状态。']};
-  content.innerHTML=`<div class="runtime-view">${heading(...titles[tab])}<nav class="runtime-tabs" aria-label="监控分类">${[['cluster','集群资源'],['train','训练与评测'],['services','本机服务']].map(([value,label])=>`<a class="${tab===value?'selected':''}" href="${href('runtime',{tab:value})}" ${tab===value?'aria-current="page"':''}>${label}</a>`).join('')}</nav><div class="runtime-content" id="runtime-content"></div></div>`;
+  content.innerHTML=`<div class="runtime-view${tab==='cluster'?' runtime-cluster':''}">${heading(...titles[tab])}<nav class="runtime-tabs" aria-label="监控分类">${[['cluster','集群资源'],['train','训练与评测'],['services','本机服务']].map(([value,label])=>`<a class="${tab===value?'selected':''}" href="${href('runtime',{tab:value})}" ${tab===value?'aria-current="page"':''}>${label}</a>`).join('')}</nav><div class="runtime-content" id="runtime-content"></div></div>`;
   if(tab==='cluster') {
     runtimeCleanup=mountCluster($('#runtime-content'),{isCurrent:()=>epoch===renderEpoch,onRead:data=>{
       if(epoch!==renderEpoch) return;

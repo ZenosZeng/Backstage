@@ -317,7 +317,7 @@ class Workspace:
             text = home.read_text()
             title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), home.stem)
             description = next((p.strip().replace("\n", " ") for p in text.split("\n\n")
-                                if p.strip() and not p.startswith(("#", "![", "更新"))), "")
+                                if p.strip() and not p.strip().startswith(("#", "![", "更新"))), "")
             name = home.stem
             docs = {relative}
             diagram = home.with_suffix(".svg").relative_to(self.root).as_posix()
