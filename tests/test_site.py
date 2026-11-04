@@ -44,8 +44,9 @@ class PublicSiteTests(unittest.TestCase):
             build_site.build(output)
             build_site.build(output)  # An ordinary rebuild remains possible.
         self.assertTrue((output / ".nojekyll").is_file())
-        self.assertEqual((output / "demo/app.js").read_bytes(),
-                         (ROOT / "tools/web/static/app.js").read_bytes())
+        for name in build_site.WORKBENCH_FILES:
+            self.assertEqual((output / "demo" / name).read_bytes(),
+                             (ROOT / "tools/web/static" / name).read_bytes(), name)
         self.assertEqual((output / "demo/api.js").read_bytes(),
                          (ROOT / "site/demo/api.js").read_bytes())
         for path in output.rglob("*"):

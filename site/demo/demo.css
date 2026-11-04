@@ -1,9 +1,9 @@
-.demo-banner{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:14px 34px;background:#30264b;color:#eee6ff;border-bottom:1px solid #614782;font-size:13px;line-height:1.6}
-.demo-banner strong{font:700 10px/1.4 ui-monospace,monospace;letter-spacing:.12em;padding:5px 7px;border:1px solid #8a6ba9;border-radius:4px;white-space:nowrap;color:#fff}
-.demo-banner a{margin-left:auto;color:#e3d0ff;text-decoration:underline;text-underline-offset:3px}
+.demo-banner{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 24px;background:#203449;color:#dfebf7;border-bottom:1px solid #526d88;font-size:13px;line-height:1.6}
+.demo-banner strong{font:700 10px/1.4 ui-monospace,monospace;letter-spacing:.12em;padding:5px 7px;border:1px solid #87a6c4;border-radius:4px;white-space:nowrap;color:#fff}
+.demo-banner a{margin-left:auto;color:#c5dff9;text-decoration:underline;text-underline-offset:3px}
 .demo-banner a:focus-visible{outline:2px solid currentColor;outline-offset:4px}
 .topbar{position:relative;top:auto}
-[data-theme="light"] .demo-banner{background:#f0eaf8;color:#4c396a;border-color:#d7c7ea}
-[data-theme="light"] .demo-banner strong{color:#634180;border-color:#b69bce}
-[data-theme="light"] .demo-banner a{color:#624780}
-@media(max-width:760px){.demo-banner{padding:12px 18px;gap:8px}.demo-banner span{flex-basis:calc(100% - 100px);font-size:12px}.demo-banner a{margin-left:0}}
+[data-theme="light"] .demo-banner{background:#eaf1f8;color:#344e68;border-color:#b8cadc}
+[data-theme="light"] .demo-banner strong{color:#345b82;border-color:#91aac3}
+[data-theme="light"] .demo-banner a{color:#345b82}
+@media(max-width:760px){.demo-banner{padding:6px 12px;gap:8px}.demo-banner span{flex-basis:calc(100% - 100px);font-size:12px}.demo-banner a{margin-left:0}}

@@ -651,3 +651,13 @@ def test_web_can_browse_offline_workspace_while_doctor_reports_local_path_unavai
     assert report['checks'][0]['state'] == 'error'
     handoff = fetch(server, '/api/handoff?task=example-task')
     assert handoff['repositories'][0]['available'] is False
+
+
+def test_project_summary_skips_heading_after_extra_blank_lines(workspace):
+    projects = workspace.root / '.share/knowledge/projects'
+    projects.mkdir()
+    (projects / 'example.md').write_text(
+        '# Example\n\n\n## Recent work\n\nProject overview paragraph.\n\nMore detail.'
+    )
+    project = workspace.overview()['projects'][0]
+    assert project['description'] == 'Project overview paragraph.'

@@ -6,11 +6,8 @@
 
 为 Codex、Claude Code 和 Kimi 提供跨仓库记忆、只读工作台、任务监控与飞书遥控。
 
-[![tests](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml/badge.svg)](https://github.com/ZenosZeng/Backstage/actions/workflows/tests.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![version](https://img.shields.io/github/v/tag/ZenosZeng/Backstage)](https://github.com/ZenosZeng/Backstage/tags)
 [![GitHub Pages](https://img.shields.io/badge/GitHub_Pages-Website-2676D9?logo=github)](https://zenoszeng.github.io/Backstage/)
-[![Demo](https://img.shields.io/badge/Demo-Try_it-7C6FCB.svg)](https://zenoszeng.github.io/Backstage/demo/)
 [![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/ZenosZeng/badge.svg)](https://hub.xerj.org/contributors/ZenosZeng)
 
 - **共享记忆**：记录事实、决策与来源，用稳定 task ID 串联跨仓库工作。
@@ -20,7 +17,7 @@
 
 ## 当前版本
 
-最新版本：**v0.13.0** · 当前功能版本：**v0.13.0**。
+最新版本：**v0.13.1** · 当前功能版本：**v0.13.0**。
 
 **v0.13.0 主要功能**
 
