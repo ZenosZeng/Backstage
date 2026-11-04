@@ -18,6 +18,7 @@
       <nav class="main-nav" aria-label="主导航">
         <a href="#workspace">工作台</a>
         <a href="#capabilities">能力</a>
+        <a href="#feishu">飞书遥控</a>
         <a href="#start">开始使用</a>
       </nav>
       <div class="header-actions">
@@ -32,7 +33,7 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> OPEN-SOURCE AGENT WORKSPACE</p>
         <h1 id="hero-title">工作可以继续。<br><span>上下文不必重来。</span></h1>
-        <p class="hero-description">把多 Agent、多仓库的记忆、项目历程和运行证据，放进同一个工作区。下一次开始，从已经确认的事实出发。</p>
+        <p class="hero-description">为 Codex、Claude Code 和 Kimi 组织跨仓库记忆、任务与项目文档。用时间线回顾进展，用资源面板看机器状态，也能通过飞书继续与本机 Agent 协作。</p>
         <div class="hero-actions">
           <a class="button button-primary" href="./demo/">打开交互 Demo <span aria-hidden="true">↗</span></a>
           <a class="button button-secondary" href="https://github.com/ZenosZeng/Backstage">查看 GitHub <span aria-hidden="true">↗</span></a>
@@ -63,7 +64,7 @@
       <div class="section-heading"><div><p class="eyebrow">PROJECT JOURNEYS</p><h2 id="workspace-title">从一段对话，<br>看见整个项目。</h2></div><div class="section-intro"><p>先看项目，再看任务。沿着时间线展开关键决策与验证，需要时再追溯原始依据。</p><a class="text-link" href="./demo/">亲手探索合成工作区 <span aria-hidden="true">↗</span></a></div></div>
       <figure class="workspace-shot">
         <div class="shot-toolbar"><span class="window-controls" aria-hidden="true"><i></i><i></i><i></i></span><span>Backstage / 项目时间线</span><span class="demo-tag">DEMO DATA</span></div>
-        <a href="./demo/" aria-label="打开合成数据交互 Demo"><img src="./assets/workspace-preview.png" alt="Backstage 合成数据工作台：按项目浏览时间线，并展开任务与关键记录" width="1600" height="1320" loading="lazy" decoding="async"></a>
+        <a href="./demo/" aria-label="打开合成数据交互 Demo"><img src="./assets/workspace-preview.png" alt="Backstage 合成数据工作台：按项目浏览时间线，并展开任务与关键记录" width="1600" height="1000" loading="lazy" decoding="async"></a>
         <figcaption><span>来自交互 Demo 的真实界面</span><span>所有项目、记录与状态均为合成示例</span></figcaption>
       </figure>
       <p class="workspace-footnote">时间条表示已有记录的首尾跨度，不代表计划排期或连续工作时长。任务状态与运行状态分别展示。</p>
@@ -76,10 +77,39 @@
           <article class="capability-card memory-card"><span class="feature-index">01 / MEMORY</span><div class="feature-symbol" aria-hidden="true">≡</div><h3>记住结论，也记住来路。</h3><p>以结构化事件记录事实、决策和验证依据。稳定的任务 ID 串联跨仓库工作，重要信息可以回到来源核对。</p><div class="feature-bottom"><span class="feature-label">可追溯的共享记忆</span><a href="https://github.com/ZenosZeng/Backstage/blob/main/docs/memory.md" aria-label="阅读记忆与同步文档">↗</a></div></article>
           <article class="capability-card task-card"><span class="feature-index">02 / JOURNEYS</span><div class="feature-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5v18h14V3h-4 M9 2h6v4H9z M8 11h8 M8 15h6"/></svg></div><h3>看项目的来龙去脉。</h3><p>时间线组织项目、任务与关键节点。把项目知识、成果和关联会话放回上下文，不用先翻一长串原始记忆。</p><div class="feature-bottom"><span class="feature-label">按项目阅读与追溯</span><a href="https://github.com/ZenosZeng/Backstage/blob/main/tools/web/README.md" aria-label="阅读项目工作台文档">↗</a></div></article>
           <article class="capability-card runtime-card"><span class="feature-index">03 / OBSERVABILITY</span><div class="feature-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div><h3>看见状态，保留判断。</h3><p>查看已配置的集群资源快照、业务监控和本机服务。清楚标记采样时间、不可用与未配置；网页保持只读。</p><div class="feature-bottom"><span class="feature-label">只读监控与来源提示</span><a href="https://github.com/ZenosZeng/Backstage/blob/main/tools/README.md" aria-label="阅读监控工具文档">↗</a></div></article>
-          <article class="capability-card interaction-card"><span class="feature-index">04 / INTERACTION</span><div class="feature-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H9l-5 4V4 M8 9h8 M8 13h5"/></svg></div><h3>需要你时，把问题送到。</h3><p>独立配置飞书遥控和待决策提醒。任务交互与运行通知各有记录；收到通知，不会被当作已经获得批准。</p><div class="feature-bottom"><span class="feature-label">飞书交互与决策提醒</span><a href="https://github.com/ZenosZeng/Backstage/blob/main/tools/watchdog/README.md" aria-label="阅读交互提醒文档">↗</a></div></article>
+          <article class="capability-card interaction-card"><span class="feature-index">04 / INTERACTION</span><div class="feature-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v13H9l-5 4V4 M8 9h8 M8 13h5"/></svg></div><h3>在飞书里，继续手头的工作。</h3><p>直接发送自然语言任务，切换 Claude / DSH、查看进度、排队或打断任务；需要决策时通过问题卡片回复，按聊天分别保留会话。</p><div class="feature-bottom"><span class="feature-label">飞书交互与决策提醒</span><a href="#feishu" aria-label="了解飞书遥控">↗</a></div></article>
         </div>
       </div>
     </section>
+
+    <section class="section-space shell daily-section" id="workflow" aria-labelledby="workflow-title">
+      <div class="section-heading"><div><p class="eyebrow">DAILY WORKFLOW</p><h2 id="workflow-title">配置一次，日常用对话推进。</h2></div><p class="section-intro">在已接入入口规则与 Skill 的工作区中，让 Agent 按约定读取和记录上下文。CLI 用于初始化、维护与排障。</p></div>
+      <div class="workflow-grid">
+        <article><h3>01 · 接着做</h3><blockquote>“回顾这个项目的状态、最近决策和未完成事项，再继续。”</blockquote><p>按项目与任务读取相关记录，核对当前代码和环境，减少跨会话重复交代。</p></article>
+        <article><h3>02 · 留下依据</h3><blockquote>“记录这次修复的原因、验证结果和下一步。”</blockquote><p>结构化记忆保留来源和状态；项目知识承载摘要，Markdown 与 SVG 文档保留完整叙述。</p></article>
+        <article><h3>03 · 检查与交接</h3><blockquote>“看看机器资源，并准备给下一位 Agent 的任务交接。”</blockquote><p>查看带采样时间的资源快照；按任务整理决策、验证和会话来源，交接材料准备后再派发。</p></article>
+      </div>
+      <div class="demo-links"><a href="./demo/#/projects">项目时间线 ↗</a><a href="./demo/#/documents">项目文档与进展 ↗</a><a href="./demo/#/runtime?tab=cluster">八卡资源面板 ↗</a></div>
+      <p class="section-note">工作台按项目 → 任务 → 证据组织信息。任务关闭不等于项目完成，运行观测不等于业务状态；缺少依据时明确显示未知。</p>
+    </section>
+
+    <section class="feishu-section section-space" id="feishu" aria-labelledby="feishu-title"><div class="shell">
+      <div class="section-heading"><div><p class="eyebrow">FEISHU REMOTE CONTROL</p><h2 id="feishu-title">不在终端前，也能继续协作。</h2></div><p class="section-intro">飞书桥接连接本机 Agent CLI。配置后私聊直接发任务，群聊 @机器人；网页保持只读，遥控在飞书中完成。</p></div>
+      <div class="feishu-grid">
+        <div class="feishu-copy"><h3>一条消息，接上当前工作。</h3><p>发送“检查这个仓库的测试，说明失败原因”，机器人在当前目录调用 Agent，并更新同一张进度卡片，显示动作、近期输出和执行结果。</p><ul><li>Claude 与可选 DSH 分别保留上下文；聊天之间隔离目录、队列和会话。</li><li>执行中用 /queue 排队，或发送“停止”打断；任务结束后查看结果与耗时。</li><li>待决策问题通过 /questions 查询、/answer 回复。收到通知不等于授权执行。</li></ul><p>首次接入需要飞书应用凭据、用户白名单、已登录的本机 CLI 和明确权限档；默认只读。凭据留在本机，权限配置决定 Agent 可以执行哪些操作。</p><a class="text-link" href="https://github.com/ZenosZeng/Backstage/blob/main/tools/README.md#飞书凭据">配置与完整命令说明 ↗</a></div>
+        <div class="command-list" aria-label="飞书常用指令">
+          <div><code>/status</code><span>当前 Agent、目录、上下文与队列</span></div>
+          <div><code>/claude · /dsh</code><span>切换执行器，分别保留会话</span></div>
+          <div><code>/cd &lt;目录&gt;</code><span>切换当前聊天的工作目录</span></div>
+          <div><code>/queue &lt;任务&gt;</code><span>排队执行，上限 5 条</span></div>
+          <div><code>/questions</code><span>列出本机待决策问题</span></div>
+          <div><code>/answer &lt;id&gt; &lt;回答&gt;</code><span>写回问题答案，供 Agent 继续处理</span></div>
+          <div><code>/new</code><span>重置当前执行器上下文及待执行队列</span></div>
+          <div><code>/help · 停止</code><span>查看帮助，或打断当前任务</span></div>
+        </div>
+      </div>
+      <p class="section-note">飞书遥控、watchdog 状态通知和交互提醒分别配置。静态 Demo 只展示合成数据，不连接飞书、不派发任务。</p>
+    </div></section>
 
     <section class="boundary-section section-space shell" aria-labelledby="boundary-title">
       <div class="boundary-intro"><p class="eyebrow">YOUR WORKSPACE, YOUR DATA</p><h2 id="boundary-title">工具开源。<br>工作区属于你。</h2><p>从本地开始，按需配置私有 S3 共享。官网和 Demo 都不连接你的工作区，也不读取真实记忆。</p><a class="text-link" href="https://github.com/ZenosZeng/Backstage/blob/main/docs/memory.md">了解数据与同步边界 <span aria-hidden="true">↗</span></a></div>
