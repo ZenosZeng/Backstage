@@ -166,7 +166,7 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
         const age=numeric(disk?.sampled_at)?Date.now()/1000-disk.sampled_at:null;
         const stale=disk?.state==='error' || data.scope!=='synthetic' && age!==null && (age>360 || age< -5) || !data.collector_running;
         const text=numeric(disk?.percent)?`${percent(disk.percent)}${stale?'*':''}`:disk?.state==='error'?'失败':disk?'待采样':'未配置';
-        const detail=disk?`${label} ${disk.path} · 文件系统 ${disk.mount || '未知'} · 已用 ${bytes(disk.used_bytes)} / 总量 ${bytes(disk.total_bytes)} · 可用 ${bytes(disk.available_bytes)} · 采样 ${date(disk.sampled_at)} · 每 5 分钟更新${stale?' · 旧读数':''}${disk.error?' · '+disk.error:''}`:`${label}未配置`;
+        const detail=disk?`${label} ${disk.path} · 文件系统 ${disk.mount || '未知'} · 已用 ${bytes(disk.used_bytes)} / 总量 ${bytes(disk.total_bytes)} · 可用 ${numeric(disk.available_bytes) && disk.available_bytes<=0?'0 GiB（无可用空间）':bytes(disk.available_bytes)} · 采样 ${date(disk.sampled_at)} · 每 5 分钟更新${stale?' · 旧读数':''}${disk.error?' · '+disk.error:''}`:`${label}未配置`;
         updateMeter(diskBars[index],disk?.percent,label,text,detail);
         diskBars[index].classList.toggle('disk-stale',!!stale);
       });

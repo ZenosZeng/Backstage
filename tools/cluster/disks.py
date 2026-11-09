@@ -4,6 +4,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
+import math
+import os
+import signal
 import shlex
 import subprocess
 import threading
@@ -60,7 +63,7 @@ class DiskSampler:
             with self.lock:
                 if self.stop.is_set():
                     return
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self.processes.add(process)
             stdout, stderr = process.communicate(timeout=15)
             if process.returncode:
@@ -69,21 +72,31 @@ class DiskSampler:
             if not isinstance(result, dict) or set(result) != set(paths):
                 raise ValueError('Invalid disk sample')
             for key, value in result.items():
-                if not isinstance(value, dict) or value.get('state') not in {'available', 'error'}:
-                    raise ValueError('Invalid disk sample')
-                if value['state'] == 'available':
-                    numbers = [value.get(k) for k in ('total_bytes', 'used_bytes', 'available_bytes', 'percent', 'sampled_at')]
-                    if any(type(n) not in (int, float) or not 0 <= n < float('inf') for n in numbers):
-                        raise ValueError('Invalid disk numbers')
+                try:
+                    if not isinstance(value, dict) or value.get('state') not in ('available', 'error'):
+                        raise ValueError('Invalid disk sample')
+                    if value['state'] == 'available':
+                        for field in ('total_bytes', 'used_bytes', 'available_bytes', 'percent', 'sampled_at'):
+                            number = value.get(field)
+                            if (type(number) not in (int, float) or not math.isfinite(number)
+                                    or field != 'available_bytes' and number < 0):
+                                raise ValueError('Invalid disk numbers')
+                except (ValueError, OverflowError) as error:
+                    result[key] = {'state': 'error', 'error': str(error)}
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             result = {key: {'state': 'error', 'error': str(error)[:200]} for key in paths}
         finally:
             if process is not None:
-                if process.poll() is None:
-                    process.kill()
-                process.communicate()
                 with self.lock:
+                    self.kill_group(process)
                     self.processes.discard(process)
+                # Never drain pipes here: descendants can retain them after SSH exits.
+                try:
+                    process.wait(timeout=3)
+                finally:
+                    for stream in (process.stdout, process.stderr):
+                        if stream:
+                            stream.close()
         with self.lock:
             for key, value in result.items():
                 # Keep the original timestamp on failure; old values are explicitly stale.
@@ -114,9 +127,16 @@ class DiskSampler:
                     seen = request
                 self.stop.wait(1)
 
+    @staticmethod
+    def kill_group(process):
+        # Signal even when the SSH parent exited but its proxy still owns the pipes.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     def close(self):
         with self.lock:
             self.stop.set()
             for process in self.processes:
-                if process.poll() is None:
-                    process.terminate()
+                self.kill_group(process)
