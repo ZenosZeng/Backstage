@@ -515,3 +515,31 @@ main { padding-top: 16px; padding-bottom: 24px; }
 .journey-attention-disclosure { margin: 0 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .journey-attention-disclosure > summary { padding: 9px 14px; cursor: pointer; font-size: 13px; color: var(--amber); }
 .journey-attention-disclosure .task-attention { margin: 0; border: 0; }
+
+/* Full-width workbench with navigation in the existing top bar. */
+body > .shell { margin-left: 0; }
+body .shell > header.workspace-topbar { height: auto; min-height: 56px; padding: 7px 24px; gap: 12px; flex-wrap: wrap; }
+.workspace-topbar .brand { padding: 0; font-size: 20px; gap: 8px; flex-shrink: 0; }
+.workspace-topbar .brand > span:nth-child(2) { display: inline; }
+.workspace-topbar .brand-caption { display: none; }
+.workspace-topbar .brand-mark { width: 30px; height: 30px; font-size: 27px; }
+.workspace-nav { display: flex; flex-direction: row; align-items: center; gap: 4px; }
+.workspace-nav a { font-size: 13px; font-weight: 600; gap: 7px; padding: 7px 10px; white-space: nowrap; }
+.workspace-nav a .nav-count { display: inline; margin-left: 2px; }
+.workspace-nav a svg { width: 17px; height: 17px; }
+.workspace-topbar .workspace-switch { display: flex; margin: 0; padding: 3px 8px; max-width: 190px; }
+.workspace-topbar .workspace-icon { display: none; }
+.workspace-topbar #global-search { flex: 1; min-width: 100px; max-width: 320px; width: auto; margin-left: auto; margin-right: 0; }
+.workspace-topbar .icon-button { flex-shrink: 0; }
+.workspace-version { white-space: nowrap; }
+@media(max-width:1200px) { .workspace-topbar .workspace-switch { display: none; } }
+@media(max-width:650px) {
+  body .shell > header.workspace-topbar { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 7px; padding: 8px 12px; }
+  .workspace-topbar .brand { grid-column: 1; grid-row: 1; }
+  .workspace-topbar #theme-toggle { grid-column: 2; grid-row: 1; }
+  .workspace-topbar #refresh { grid-column: 3; grid-row: 1; }
+  .workspace-nav { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 3px; }
+  .workspace-nav a { padding: 7px 3px; font-size: 12px; gap: 4px; justify-content: center; }
+  .workspace-nav a .nav-count { display: none; }
+  .workspace-topbar #global-search { grid-column: 1 / -1; grid-row: 3; width: 100%; max-width: none; margin: 0; }
+}

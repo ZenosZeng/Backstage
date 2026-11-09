@@ -23,6 +23,7 @@ import urllib.request
 
 from tools.cluster.config import settings_fingerprint, validate_config
 from tools.config import atomic_json
+from tools.cluster.disks import DiskSampler
 
 
 def normalized_ip(value):
@@ -146,6 +147,7 @@ class Monitor:
                              for port in range(self.ports["start"], self.ports["end"]+1)} if self.ports else {})
         self.public_host = self.ports["public_host"] if self.ports else None
         self.started = False
+        self.disks = DiskSampler(self.config['hosts'], self.config_hash)
 
     def start(self):
         with self.lock:
@@ -359,7 +361,7 @@ class Monitor:
             return {"schema_version": 1, "config_hash": self.config_hash,
                     "state": "stopped" if self.stop.is_set() else "collecting", "time": now,
                     "interval": self.interval, "health_interval": self.health_interval,
-                    "nodes": nodes, "summary": {"online": sum(node["status"] == "online" for node in nodes),
+                    "disk_usage": self.disks.snapshot(), "nodes": nodes, "summary": {"online": sum(node["status"] == "online" for node in nodes),
                     "nodes": len(nodes), "gpus": len(gpus), "cpu_percent": cpu_total/cpu_count if cpu_count else None,
                     "gpu_percent": statistics.mean(gpu_utils) if gpu_utils else None,
                     "active_gpus": sum(value >= 10 for value in gpu_peaks),
@@ -369,6 +371,7 @@ class Monitor:
                     "power_watts": sum(gpu["power_watts"] or 0 for gpu in gpus)}, "ports": ports}
 
     def close(self):
+        self.disks.close()
         with self.lock:
             self.stop.set()
             processes, threads = list(self.processes.values()), list(self.threads)
@@ -392,6 +395,10 @@ class Monitor:
             if stop.is_set():
                 self.stop.set()
             self.start()
+            if not self.stop.is_set():
+                thread = threading.Thread(target=self.disks.run, args=(directory,), daemon=True)
+                self.threads.append(thread)
+                thread.start()
             while not stop.is_set() and not self.stop.is_set():
                 atomic_json(directory / "snapshot.json", self.snapshot())
                 stop.wait(self.interval)

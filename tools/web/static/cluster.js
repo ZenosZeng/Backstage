@@ -1,5 +1,5 @@
 // This view only reads the collector's saved snapshot. It never starts collection.
-import {api} from './api.js';
+import {api,refreshDisks} from './api.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const numeric = value => typeof value === 'number' && Number.isFinite(value);
 const fixed = (value, digits=1) => numeric(value) ? value.toFixed(digits) : '—';
@@ -43,9 +43,10 @@ function savedFontScale() {
 
 export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
   let data=null, filter='', search='', paused=false, pending=false, closed=false, request=0, controller=null, failed=false;
+  let diskPending=false, diskRequest=null, diskRequestAt=0, diskController=null, diskMessage='';
   const current=()=>!closed && isCurrent();
   const $=selector=>target.querySelector(selector);
-  target.innerHTML=`<div class="cluster-monitor"><div class="cluster-toolbar"><div class="cluster-connection" role="status" id="cluster-connection">正在读取集群快照…</div><div class="cluster-actions"><label class="cluster-font-control" for="cluster-font-scale">字号<select id="cluster-font-scale" aria-label="集群字号缩放">${fontScales.map(scale=>`<option value="${scale}">${scale}%</option>`).join('')}</select></label><button class="button" data-cluster-pause aria-pressed="false">暂停画面</button><button class="button" data-cluster-refresh>读取最新快照</button></div></div><details class="cluster-provenance" id="cluster-provenance"></details><div id="cluster-notice"></div><div id="cluster-summary" class="cluster-summary"></div><section id="cluster-resources" hidden><div class="cluster-filterbar"><div class="cluster-filters" id="cluster-filters" role="group" aria-label="机器类型筛选"></div><label class="cluster-search"><span aria-hidden="true">⌕</span><input id="cluster-search" type="search" aria-label="搜索集群机器" placeholder="搜索机器、分组或 IP"></label></div><div class="cluster-caption"><span>综合 / GPU / 显存</span><span>逐卡：GPU 近 60 秒均值 / 显存（GiB）</span></div><div id="cluster-nodes" class="cluster-nodes"></div><p class="cluster-note">GPU 利用率为近 60 秒窗口均值，峰值见卡片提示；活跃卡按窗口峰值 ≥ 10% 统计。过期节点不计入采集时的整体利用率。</p></section><details id="cluster-ports" class="cluster-ports" hidden><summary>端口健康与流量来源<span>按需查看已配置的入口观测</span></summary><div id="cluster-port-content"></div></details></div>`;
+  target.innerHTML=`<div class="cluster-monitor"><div class="cluster-toolbar"><div class="cluster-connection" role="status" id="cluster-connection">正在读取集群快照…</div><div class="cluster-actions"><label class="cluster-font-control" for="cluster-font-scale">字号<select id="cluster-font-scale" aria-label="集群字号缩放">${fontScales.map(scale=>`<option value="${scale}">${scale}%</option>`).join('')}</select></label><button class="button" data-cluster-pause aria-pressed="false">暂停画面</button><button class="button" data-cluster-refresh>读取最新快照</button><button class="button" data-disk-refresh title="独立采集家目录和挂载盘用量，每 5 分钟自动更新">刷新磁盘</button><span id="cluster-disk-status" role="status"></span></div></div><details class="cluster-provenance" id="cluster-provenance"></details><div id="cluster-notice"></div><div id="cluster-summary" class="cluster-summary"></div><section id="cluster-resources" hidden><div class="cluster-filterbar"><div class="cluster-filters" id="cluster-filters" role="group" aria-label="机器类型筛选"></div><label class="cluster-search"><span aria-hidden="true">⌕</span><input id="cluster-search" type="search" aria-label="搜索集群机器" placeholder="搜索机器、分组或 IP"></label></div><div class="cluster-caption"><span>综合 / GPU / 显存</span><span>逐卡：GPU 近 60 秒均值 / 显存（GiB）</span></div><div id="cluster-nodes" class="cluster-nodes"></div><p class="cluster-note">GPU 利用率为近 60 秒窗口均值，峰值见卡片提示；活跃卡按窗口峰值 ≥ 10% 统计。过期节点不计入采集时的整体利用率。</p></section><details id="cluster-ports" class="cluster-ports" hidden><summary>端口健康与流量来源<span>按需查看已配置的入口观测</span></summary><div id="cluster-port-content"></div></details></div>`;
   $('.cluster-toolbar').prepend($('#cluster-summary'));
   $('.cluster-actions').prepend($('#cluster-provenance'));
   const fontRoot=$('.cluster-monitor');
@@ -65,8 +66,13 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
   function fresh() {
     return !!data && data.state==='available' && data.collector_running && data.snapshot?.state!=='stopped' && !failed && !paused;
   }
+  function paintMeter(fill,value) {
+    const vertical=fill.dataset.vertical==='true';
+    fill.style.width=vertical?'100%':`${clamp(value)}%`;
+    if(vertical) fill.style.height=`${clamp(value)}%`;
+  }
   function applyMeters() {
-    target.querySelectorAll('[data-meter]').forEach(el=>{el.style.width=`${clamp(Number(el.dataset.meter))}%`;});
+    target.querySelectorAll('[data-meter]').forEach(el=>paintMeter(el,Number(el.dataset.meter)));
   }
   function renderStatus() {
     if(!current()) return;
@@ -79,6 +85,15 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
     $('[data-cluster-pause]').textContent=paused?'继续刷新':'暂停画面';
     $('[data-cluster-pause]').setAttribute('aria-pressed',String(paused));
     $('[data-cluster-refresh]').disabled=pending;
+    const disks=data?.snapshot?.disk_usage;
+    if(diskRequest!==null && disks?.completed_request===diskRequest) {
+      diskRequest=null;diskMessage='磁盘采集完成';
+    } else if(diskRequest!==null && Date.now()-diskRequestAt>60000) {
+      diskRequest=null;diskMessage='磁盘采集未完成，请查看采样时间';
+    }
+    $('[data-disk-refresh]').disabled=diskPending || diskRequest!==null || !!disks?.refreshing || !data?.collector_running || !Object.keys(disks?.nodes || {}).length;
+    $('[data-disk-refresh]').textContent=diskPending || diskRequest!==null || disks?.refreshing?'磁盘采集中…':'刷新磁盘';
+    $('#cluster-disk-status').textContent=diskMessage;
     if(data) {
       const provenance=$('#cluster-provenance');
       if(!provenance.querySelector('summary')) provenance.innerHTML='<summary></summary><div></div>';
@@ -102,7 +117,9 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
     }
     const fill=element.querySelector('i');
     fill.dataset.meter=String(clamp(value));
-    fill.style.width=`${clamp(value)}%`;
+    paintMeter(fill,value);
+    if(known && fill.dataset.vertical==='true') element.setAttribute('aria-orientation','vertical');
+    else element.removeAttribute('aria-orientation');
     setText(element.querySelector('span'),label);
     setText(element.querySelector('strong'),text);
   }
@@ -117,14 +134,15 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
       let card=nodeCards.get(node.alias);
       if(!card) {
         card=document.createElement('article');
-        card.innerHTML=`<div class="cluster-node-head"><div class="cluster-node-name"><strong></strong><span class="cluster-node-status"></span></div><div class="cluster-node-metrics">${metric('CPU','—',null)}${metric('内存','—',null)}${metric('功耗','—',null)}</div></div><div class="cluster-gpu-rows"></div><p class="cluster-node-empty">尚无 GPU 读数</p><div class="cluster-node-foot cluster-error" hidden></div>`;
+        card.innerHTML=`<div class="cluster-node-main"><div class="cluster-node-head"><div class="cluster-node-name"><strong></strong><span class="cluster-node-status"></span></div><div class="cluster-node-metrics">${metric('CPU','—',null)}${metric('内存','—',null)}${metric('功耗','—',null)}</div></div><div class="cluster-gpu-rows"></div><p class="cluster-node-empty">尚无 GPU 读数</p><div class="cluster-node-foot cluster-error" hidden></div></div><div class="cluster-node-disks" role="group" aria-label="磁盘容量，每 5 分钟独立采样">${meter(null,'家目录','—')}${meter(null,'挂载盘','—')}</div>`;
+        card.querySelectorAll('.cluster-node-disks i').forEach(fill=>{fill.dataset.vertical='true';});
         nodeCards.set(node.alias,card);
       }
       // Retain cards and meters across polling; only hardware changes rebuild GPU rows.
       const shape=JSON.stringify(gpus.map(gpu=>gpu.index));
       const rows=card.querySelector('.cluster-gpu-rows');
       if(rows.dataset.shape!==shape) {
-        rows.innerHTML=['GPU','显存'].map(label=>`<div class="cluster-gpus" aria-label="${label}利用率">${gpus.map(gpu=>meter(null,`${label} ${gpu.index}`,'—')).join('')}</div>`).join('');
+        rows.innerHTML=['GPU','显存'].map(label=>`<div class="cluster-gpus" data-label="${label}" aria-label="${label}利用率">${gpus.map(gpu=>meter(null,`${label} ${gpu.index}`,'—')).join('')}</div>`).join('');
         rows.dataset.shape=shape;
       }
       const windowed=sample?.gpu_sampling==='loop', single=sample?.gpu_sampling==='single';
@@ -140,6 +158,18 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
       updateMeter(metrics[0],sample?.cpu_percent,'CPU',percent(sample?.cpu_percent));
       updateMeter(metrics[1],sample?.memory?.percent,'内存',percent(sample?.memory?.percent));
       updateMeter(metrics[2],numeric(watts)&&numeric(limit)&&limit>0?100*watts/limit:null,'功耗',numeric(watts)?`${fixed(watts,0)} W`:'—',`平均功耗 ${fixed(watts,0)} / ${fixed(limit,0)} W`);
+      const disks=data.snapshot.disk_usage?.nodes?.[node.alias] || {};
+      const diskBars=card.querySelectorAll('.cluster-node-disks .cluster-bar');
+      const bytes=value=>numeric(value)?(value/1024**(value>=1024**4?4:3)).toFixed(1)+(value>=1024**4?' TiB':' GiB'):'—';
+      ['home','data'].forEach((key,index)=>{
+        const disk=disks[key], label=index?'挂载盘':'家目录';
+        const age=numeric(disk?.sampled_at)?Date.now()/1000-disk.sampled_at:null;
+        const stale=disk?.state==='error' || data.scope!=='synthetic' && age!==null && (age>360 || age< -5) || !data.collector_running;
+        const text=numeric(disk?.percent)?`${percent(disk.percent)}${stale?'*':''}`:disk?.state==='error'?'失败':disk?'待采样':'未配置';
+        const detail=disk?`${label} ${disk.path} · 文件系统 ${disk.mount || '未知'} · 已用 ${bytes(disk.used_bytes)} / 总量 ${bytes(disk.total_bytes)} · 可用 ${numeric(disk.available_bytes) && disk.available_bytes<=0?'0 GiB（无可用空间）':bytes(disk.available_bytes)} · 采样 ${date(disk.sampled_at)} · 每 5 分钟更新${stale?' · 旧读数':''}${disk.error?' · '+disk.error:''}`:`${label}未配置`;
+        updateMeter(diskBars[index],disk?.percent,label,text,detail);
+        diskBars[index].classList.toggle('disk-stale',!!stale);
+      });
       gpus.forEach((gpu,i)=>{
         const memory=numeric(gpu.memory_used_mib) && numeric(gpu.memory_total_mib) && gpu.memory_total_mib>0?100*gpu.memory_used_mib/gpu.memory_total_mib:null;
         const peak=windowed?`60 秒峰值 ${percent(gpu.utilization_peak)}`:single?'单次值 · 峰值未知':'采样方式未声明';
@@ -213,7 +243,7 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
     const singles=numeric(s.gpu_single_count)?s.gpu_single_count:0;
     const allWindowed=numeric(s.gpus) && s.gpus>0 && s.gpu_window_count===s.gpus;
     $('.cluster-caption > span:last-child').textContent=singles>0?'GPU：含单次瞬时值，采样方式见节点详情':allWindowed?'GPU：近 60 秒均值':'GPU：采样方式见节点详情';
-    $('#cluster-resources > .cluster-note').textContent='每台机器依次为综合、GPU 利用率、显存利用率；悬浮查看采样时间、峰值及显存容量。每行固定八卡，按 GPU 0–7 从左至右排列；上排 GPU，下排显存。';
+    $('#cluster-resources > .cluster-note').textContent='每台机器依次为综合、GPU 利用率、显存利用率；悬浮查看采样时间、峰值及显存容量。每行固定八卡，按 GPU 0–7 从左至右排列；上排 GPU，下排显存。右侧竖条为磁盘容量，独立每 5 分钟更新，悬浮查看路径与容量；* 表示旧读数。';
     setText($('#cluster-summary'),`${fresh()?'在线节点':'快照在线节点'} ${numeric(s.online)?s.online:'—'} / ${numeric(s.nodes)?s.nodes:'—'}`);
     const groups=[...new Set((snapshot.nodes || []).map(node=>node.group).filter(Boolean))].sort();
     if(filter && !groups.includes(filter)) filter='';
@@ -240,7 +270,24 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
       if(current()) renderStatus();
     }
   }
+  async function requestDisks() {
+    if(diskPending || diskRequest!==null) return;
+    diskPending=true;diskMessage='';diskController=new AbortController();renderStatus();
+    const timeout=setTimeout(()=>diskController?.abort(),10000);
+    try {
+      const result=await refreshDisks({signal:diskController.signal});
+      if(!current()) return;
+      if(result.state==='demo') diskMessage=result.notice;
+      else {diskRequest=result.requested_at;diskRequestAt=Date.now();diskMessage='';}
+    } catch(error) {
+      if(current()) diskMessage=error.name==='AbortError'?'磁盘请求超时':error.message;
+    } finally {
+      clearTimeout(timeout);diskPending=false;diskController=null;
+      if(current()) renderStatus();
+    }
+  }
   function click(event) {
+    if(event.target.closest('[data-disk-refresh]')) requestDisks();
     const selected=event.target.closest('[data-cluster-filter]');
     if(selected) {filter=selected.dataset.clusterFilter;render();}
     if(event.target.closest('[data-cluster-pause]')) {
@@ -259,5 +306,5 @@ export function mountCluster(target, {isCurrent=()=>true,onRead=()=>{}}={}) {
   target.addEventListener('click',click);target.addEventListener('input',input);target.addEventListener('change',change);
   const timer=setInterval(()=>refresh(),3000);
   refresh();
-  return ()=>{closed=true;++request;clearInterval(timer);controller?.abort();target.removeEventListener('click',click);target.removeEventListener('input',input);target.removeEventListener('change',change);};
+  return ()=>{closed=true;++request;clearInterval(timer);controller?.abort();diskController?.abort();target.removeEventListener('click',click);target.removeEventListener('input',input);target.removeEventListener('change',change);};
 }

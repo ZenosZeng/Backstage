@@ -86,3 +86,8 @@ export async function api(path, params = {}, {signal} = {}) {
   if (value == null) return notFound();
   return copy(value);
 }
+
+export async function refreshDisks({signal} = {}) {
+  signal?.throwIfAborted();
+  return {state:'demo', notice:'Demo 使用固定合成磁盘快照，不连接真实机器。'};
+}

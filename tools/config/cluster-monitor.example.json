@@ -1,7 +1,23 @@
 {
   "hosts": [
-    {"alias": "gpu-node-a", "label": "GPU 节点 A", "group": "GPU"},
-    {"alias": "gpu-node-b", "label": "GPU 节点 B", "group": "GPU"}
+    {
+      "alias": "gpu-node-a",
+      "label": "GPU 节点 A",
+      "group": "GPU",
+      "disks": {
+        "home": "/home/demo",
+        "data": "/data"
+      }
+    },
+    {
+      "alias": "gpu-node-b",
+      "label": "GPU 节点 B",
+      "group": "GPU",
+      "disks": {
+        "home": "/home/demo",
+        "data": "/mnt/data"
+      }
+    }
   ],
   "interval_seconds": 5,
   "health_interval_seconds": 30
