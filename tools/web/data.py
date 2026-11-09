@@ -49,6 +49,7 @@ class Workspace:
         self.ttl = ttl
         self.clock = clock
         self._lock = threading.Lock()
+        self._disk_request_lock = threading.Lock()
         self._cached = None
         self._expires_at = 0
 
@@ -589,6 +590,29 @@ class Workspace:
         data.update(sampled_at=timestamp(datetime.now().timestamp()))
         data["read_at"] = data["sampled_at"]
         return data
+
+    def request_disk_refresh(self):
+        """Request only the configured disk read; never start a collector or accept paths."""
+        from tools.cluster.disks import REQUEST_FILE
+        from tools.config import atomic_json
+        with self._disk_request_lock:
+            data = self.cluster()
+            snapshot = data.get('snapshot') or {}
+            disks = snapshot.get('disk_usage') or {}
+            if not data['collector_running'] or not disks.get('nodes'):
+                raise ValueError('Disk collector is unavailable or unconfigured')
+            path = self.local / 'tools/cluster-monitor' / REQUEST_FILE
+            now = time.time()
+            try:
+                previous = json.loads(path.read_text())
+            except (OSError, ValueError):
+                previous = {}
+            if (isinstance(previous, dict) and previous.get('config_hash') == snapshot['config_hash']
+                    and type(previous.get('requested_at')) in (int, float)
+                    and 0 <= now - previous['requested_at'] < 30):
+                return {'state': 'queued', 'requested_at': previous['requested_at']}
+            atomic_json(path, {'requested_at': now, 'config_hash': snapshot['config_hash']})
+            return {'state': 'queued', 'requested_at': now}
 
     def cluster(self):
         """Read the collector's local snapshot; HTTP requests never start probes."""

@@ -661,3 +661,32 @@ def test_project_summary_skips_heading_after_extra_blank_lines(workspace):
     )
     project = workspace.overview()['projects'][0]
     assert project['description'] == 'Project overview paragraph.'
+
+
+def test_disk_refresh_is_scoped_same_origin_and_coalesced(server, workspace, monkeypatch):
+    disk_snapshot = {'config_hash': 'a' * 64, 'disk_usage': {'nodes': {'demo': {}}}}
+    monkeypatch.setattr(workspace, 'cluster', lambda: {'collector_running': True, 'snapshot': disk_snapshot})
+    path = '/api/cluster/disks/refresh'
+    headers = {'Content-Type': 'application/json', 'X-Backstage-Refresh': 'disks', 'Origin': server}
+    def request(extra=None, body=b'{}'):
+        return urlopen(Request(server + path, data=body, headers=headers | (extra or {}), method='POST'))
+    with request() as response:
+        first = json.load(response)
+        assert response.status == 202
+    with request() as response:
+        assert json.load(response)['requested_at'] == first['requested_at']
+    marker = workspace.local / 'tools/cluster-monitor/disk-refresh.json'
+    assert json.loads(marker.read_text())['config_hash'] == 'a' * 64
+    for extra in ({'Origin': 'https://attacker.example'}, {'X-Backstage-Refresh': ''},
+                  {'Sec-Fetch-Site': 'cross-site'}, {'Host': 'attacker.example'}):
+        with pytest.raises(HTTPError) as exc:
+            request(extra)
+        assert exc.value.code == 403
+    with pytest.raises(HTTPError) as exc:
+        request(body=b'{"path":"/other"}')
+    assert exc.value.code == 400
+    monkeypatch.setattr(workspace, 'cluster', lambda: {'collector_running': False, 'snapshot': disk_snapshot})
+    with pytest.raises(HTTPError) as exc:
+        request()
+    assert exc.value.code == 409
+    assert json.loads(marker.read_text())['requested_at'] == first['requested_at']

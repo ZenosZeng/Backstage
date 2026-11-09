@@ -111,7 +111,27 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(500, {"error": "读取失败，请检查工作区文件权限"})
 
     def do_POST(self):
-        self.respond(405, {"error": "工作台仅支持只读访问"})
+        if self.path != '/api/cluster/disks/refresh':
+            self.respond(405, {"error": "工作台不支持此操作"})
+            return
+        hosts = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        origin = self.headers.get('Origin')
+        if (self.headers.get('Host') not in hosts
+                or (origin and origin not in {f'http://{host}' for host in hosts})
+                or self.headers.get('Sec-Fetch-Site') not in (None, 'same-origin', 'none')
+                or self.headers.get('X-Backstage-Refresh') != 'disks'
+                or self.headers.get('Content-Type') != 'application/json'):
+            self.respond(403, {"error": "磁盘刷新仅允许本机同源请求"})
+            return
+        if self.headers.get('Content-Length') != '2' or self.rfile.read(2) != b'{}':
+            self.respond(400, {"error": "磁盘刷新不接受路径或命令参数"})
+            return
+        try:
+            self.respond(202, self.server.workspace.request_disk_refresh())
+        except ValueError:
+            self.respond(409, {"error": "磁盘采集未配置或采集服务未运行"})
+        except OSError:
+            self.respond(500, {"error": "无法请求磁盘刷新"})
 
 
 def main():

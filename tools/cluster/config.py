@@ -42,6 +42,14 @@ def validate_config(raw: dict) -> dict:
             if not isinstance(value, str) or not value.strip() or len(value) > 200:
                 raise ValueError(f"host {field} must be a non-empty string up to 200 characters")
             host[field] = value
+        if 'disks' in item:
+            disks = item['disks']
+            if not isinstance(disks, dict) or not disks or set(disks) - {'home', 'data'}:
+                raise ValueError('host disks must map home/data to absolute paths')
+            if any(not isinstance(path, str) or not PurePosixPath(path).is_absolute()
+                   or len(path) > 4096 or any(c in path for c in '\x00\r\n') for path in disks.values()):
+                raise ValueError('disk paths must be literal absolute remote paths')
+            host['disks'] = dict(disks)
         selected.append(host)
     settings = {
         "hosts": selected,

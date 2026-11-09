@@ -69,7 +69,7 @@ main:has(.runtime-cluster) { max-width: none; padding: 10px 24px 20px; }
 .cluster-monitor .cluster-node-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 4px; flex: 1; min-width: 0; }
 .cluster-monitor .cluster-metric { min-width: 0; }
 .cluster-monitor .cluster-gpu-rows { display: grid; gap: 4px; }
-.cluster-monitor .cluster-gpus { display: grid; grid-template-columns: repeat(8,minmax(0,1fr)); gap: 4px; }
+.cluster-monitor .cluster-gpus { display: grid; grid-template-columns: calc(32px * var(--cluster-font-scale,1)) repeat(8,minmax(0,1fr)); gap: 4px; }
 .cluster-monitor .cluster-gpus .cluster-bar > i { background: var(--cluster-gpu-fill); border-right-color: var(--cluster-gpu-edge); }
 .cluster-monitor .cluster-gpus:last-child .cluster-bar > i { background: var(--cluster-memory-fill); border-right-color: var(--cluster-memory-edge); }
 .cluster-monitor .cluster-node.stale .cluster-gpu-rows,.cluster-monitor .cluster-node.offline .cluster-gpu-rows,.cluster-monitor.is-stale .cluster-gpu-rows { filter: grayscale(.65); }
@@ -172,3 +172,26 @@ body:has(.runtime-cluster) .topbar { height: 48px; }
   .cluster-monitor .cluster-provenance { flex-basis: 100%; }
   .cluster-monitor .cluster-provenance > div { right: auto; left: 0; }
 }
+
+.cluster-monitor .cluster-bar.disk-stale { border-style: dashed; color: var(--cluster-amber); }
+.cluster-monitor #cluster-disk-status { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.cluster-monitor #cluster-disk-status:empty { display: none; }
+@container (min-width: 551px) and (max-width: 850px) {
+  .cluster-monitor .cluster-node-name { flex: .6; }
+  .cluster-monitor .cluster-node-metrics .cluster-bar { font-size: min(calc(12px * var(--cluster-font-scale,1)),1.7cqw); }
+}
+
+/* Disk capacity is independent of compute utilization and fills bottom-up. */
+.cluster-monitor .cluster-node { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; }
+.cluster-monitor .cluster-node-main { min-width: 0; container-type: inline-size; }
+.cluster-monitor .cluster-node-disks { display: grid; grid-template-columns: repeat(2,calc(46px * var(--cluster-font-scale,1))); gap: 5px; padding-left: 9px; border-left: 1px solid var(--line); align-self: stretch; }
+.cluster-monitor .cluster-node-disks .cluster-bar { flex-direction: column; justify-content: space-between; gap: 4px; min-height: 77px; padding: 5px 2px; font-size: calc(11px * var(--cluster-font-scale,1)); }
+.cluster-monitor .cluster-node-disks .cluster-bar > i { inset: auto 0 0; width: 100%; height: 0; border-right: 0; border-top: 1px solid var(--cluster-fill-edge); }
+@media (max-width:650px) {
+  .cluster-monitor .cluster-node { gap: 6px; }
+  .cluster-monitor .cluster-node-disks { grid-template-columns: repeat(2,36px); padding-left: 5px; gap: 3px; }
+  .cluster-monitor .cluster-node-disks .cluster-bar { font-size: min(calc(10px * var(--cluster-font-scale,1)),10px); }
+}
+
+/* Row names stay readable even when narrow cards only have room for values. */
+.cluster-monitor .cluster-gpus::before { content: attr(data-label); align-self: center; color: var(--muted); font-size: calc(12px * var(--cluster-font-scale,1)); font-weight: 700; line-height: 1.2; white-space: nowrap; }
